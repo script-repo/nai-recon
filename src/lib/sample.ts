@@ -1,14 +1,14 @@
 import type { Engagement } from "@/lib/store";
 
-/** Composite discovery — healthcare install-base with shadow AI and ungoverned agents. */
-export function meridianSample(): Engagement {
+/** Fictional healthcare discovery — shadow AI and ungoverned agents. */
+export function sampleEngagement(): Engagement {
   const now = new Date().toISOString();
   return {
-    id: "sample-meridian-health",
+    id: "sample-briarhaven-health",
     createdAt: now,
     updatedAt: now,
-    seName: "Alex Rivera",
-    customerName: "Meridian Health",
+    seName: "Casey Lang",
+    customerName: "Briarhaven Health",
     industry: "Healthcare & life sciences",
     region: "North America",
     meetingType: "Technical deep dive",

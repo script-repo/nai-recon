@@ -5,7 +5,7 @@ import { ArrowRight, Radar, Trash2 } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { STAGES } from "@/lib/playbook";
-import { meridianSample } from "@/lib/sample";
+import { sampleEngagement } from "@/lib/sample";
 import { answeredCount, opportunityScore, normalizedScores, computeScores } from "@/lib/scoring";
 import { useEngagements } from "@/lib/store";
 import { formatDate } from "@/lib/utils";
@@ -19,7 +19,8 @@ export function Home() {
   const active = STAGES.find((s) => s.id === openStage) ?? STAGES[0];
 
   const loadSample = () => {
-    const sample = meridianSample();
+    removeEngagement("sample-meridian-health");
+    const sample = sampleEngagement();
     importEngagement(sample);
     navigate({ to: "/e/$id/report", params: { id: sample.id } });
   };
@@ -90,7 +91,7 @@ export function Home() {
             <div className="mt-8 rounded-xl border border-dashed border-line-strong px-6 py-14 text-center">
               <p className="font-display text-lg text-fg">No discoveries yet</p>
               <p className="mx-auto mt-2 max-w-md text-sm text-muted">
-                Start a live capture, or open the Meridian Health sample to see a finished targeting
+                Start a live capture, or open the Briarhaven Health sample to see a finished targeting
                 report.
               </p>
             </div>

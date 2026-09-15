@@ -25,6 +25,6 @@ Writes a static site to `dist-pages/` that you can host anywhere.
 2. Walk the eight-stage rail. Capture answers; the coach panel explains why each question exists.
 3. Open **Report** for estate map, risks, fit scores, talk track, POC, and objection handling.
 
-**Open sample report** loads Meridian Health, a finished healthcare example.
+**Open sample report** loads Briarhaven Health, a fictional healthcare example.
 
 Optional **Polish targeting memo** needs a server-side xAI key and is disabled on the static Pages build. The rest of the report is generated in-browser without any backend.

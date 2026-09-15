@@ -63,7 +63,7 @@ export function NewEngagement() {
               required
               value={customerName}
               onChange={(e) => setCustomerName(e.target.value)}
-              placeholder="Meridian Health"
+              placeholder="Briarhaven Health"
             />
           </Field>
           <Field label="Your name" htmlFor="se">
@@ -71,7 +71,7 @@ export function NewEngagement() {
               id="se"
               value={seName}
               onChange={(e) => setSeName(e.target.value)}
-              placeholder="Alex Rivera"
+              placeholder="Casey Lang"
             />
           </Field>
           <div className="grid gap-4 sm:grid-cols-2">
