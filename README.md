@@ -2,7 +2,15 @@
 
 Channel SE discovery for [Nutanix Enterprise AI](https://www.nutanix.com/products/nutanix-enterprise-ai). Walk the eight conversations that surface shadow AI, chatbots, RAG, inference, agents, and MCP sprawl — then leave with a targeting report for **private inference** and **Agent Gateway**.
 
-Live site (GitHub Pages): [https://script-repo.github.io/nai-recon/](https://script-repo.github.io/nai-recon/)
+**Live site:** [https://script-repo.github.io/nai-recon/](https://script-repo.github.io/nai-recon/)
+
+> First deploy needs Pages enabled once (GitHub does not let the workflow do this for you):
+>
+> 1. Open **[Settings → Pages](https://github.com/script-repo/nai-recon/settings/pages)**
+> 2. **Source:** GitHub Actions
+> 3. Re-run the [GitHub Pages](https://github.com/script-repo/nai-recon/actions/workflows/pages.yml) workflow
+
+The static build already succeeds. After that one setting, the site is public.
 
 ## Run locally
 
@@ -18,16 +26,6 @@ npm run build
 ```
 
 Writes a static site to `dist-pages/` that you can host anywhere.
-
-## GitHub Pages
-
-Pushes to `main` build and deploy via `.github/workflows/pages.yml`.
-
-If the first deploy fails with a Pages environment error, enable Pages once:
-
-**Repo → Settings → Pages → Source: GitHub Actions**
-
-Then re-run the **GitHub Pages** workflow.
 
 ## What’s in the app
 
