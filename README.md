@@ -4,14 +4,6 @@ Channel SE discovery for [Nutanix Enterprise AI](https://www.nutanix.com/product
 
 **Live site:** [https://script-repo.github.io/nai-recon/](https://script-repo.github.io/nai-recon/)
 
-> First deploy needs Pages enabled once (GitHub does not let the workflow do this for you):
->
-> 1. Open **[Settings → Pages](https://github.com/script-repo/nai-recon/settings/pages)**
-> 2. **Source:** GitHub Actions
-> 3. Re-run the [GitHub Pages](https://github.com/script-repo/nai-recon/actions/workflows/pages.yml) workflow
-
-The static build already succeeds. After that one setting, the site is public.
-
 ## Run locally
 
 ```bash
