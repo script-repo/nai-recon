@@ -8,7 +8,7 @@ const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   root: "spa",
-  base: "./",
+  base: process.env.GITHUB_ACTIONS ? "/nai-recon/" : "./",
   publicDir: path.resolve(rootDir, "public"),
   envDir: rootDir,
   plugins: [viteReact(), tailwindcss()],

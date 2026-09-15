@@ -1,4 +1,8 @@
-@import "tailwindcss";
+@import "tailwindcss" source("..");
+@source "../src/**/*.{ts,tsx}";
+@source "../spa/**/*.{ts,tsx}";
+@source not "../node_modules";
+@source not "../dist-pages";
 
 @theme {
   --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
@@ -72,6 +76,14 @@
   ::selection {
     background: color-mix(in oklab, var(--color-accent) 40%, transparent);
     color: var(--color-fg);
+  }
+
+  svg.mark {
+    width: 28px;
+    height: 28px;
+    max-width: 28px;
+    display: block;
+    flex-shrink: 0;
   }
 }
 

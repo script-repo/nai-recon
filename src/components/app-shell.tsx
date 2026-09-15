@@ -7,7 +7,9 @@ export function Mark({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 32 32"
-      className={cn("size-7 text-surface-2", className)}
+      width="28"
+      height="28"
+      className={cn("mark size-7 text-surface-2", className)}
       aria-hidden="true"
     >
       <rect width="32" height="32" rx="8" fill="currentColor" />
