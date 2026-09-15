@@ -54,6 +54,30 @@ function touch(e: Engagement, patch: Partial<Engagement>): Engagement {
   return { ...e, ...patch, updatedAt: new Date().toISOString() };
 }
 
+function scrubLegacySample(e: Engagement): Engagement {
+  const meridian =
+    e.id === "sample-meridian-health" || /meridian/i.test(e.customerName ?? "");
+  if (!meridian) return e;
+  return {
+    ...e,
+    id: e.id === "sample-meridian-health" ? "sample-briarhaven-health" : e.id,
+    customerName: "Briarhaven Health",
+    seName: e.seName === "Alex Rivera" || e.id === "sample-meridian-health" ? "Casey Lang" : e.seName,
+  };
+}
+
+function scrubEngagements(engagements: Engagement[]): Engagement[] {
+  const seen = new Set<string>();
+  const next: Engagement[] = [];
+  for (const raw of engagements) {
+    const e = scrubLegacySample(raw);
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    next.push(e);
+  }
+  return next;
+}
+
 export const useEngagements = create<State>()(
   persist(
     (set, get) => ({
@@ -130,7 +154,20 @@ export const useEngagements = create<State>()(
     {
       name: "nai-recon-engagements",
       skipHydration: true,
+      version: 2,
       partialize: (s) => ({ engagements: s.engagements }),
+      migrate: (persisted) => {
+        const prev = persisted as { engagements?: Engagement[] };
+        return { engagements: scrubEngagements(prev.engagements ?? []) };
+      },
+      merge: (persisted, current) => {
+        const prev = persisted as { engagements?: Engagement[] } | undefined;
+        return {
+          ...current,
+          ...prev,
+          engagements: scrubEngagements(prev?.engagements ?? current.engagements),
+        };
+      },
     },
   ),
 );
