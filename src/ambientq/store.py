@@ -220,8 +220,32 @@ class SQLStore:
         for cid in touched:
             conv = build_conversation(cid, self.spans_for(cid))
             self.upsert_conversation(conv, source="otel")
+        self._record_span_usage(spans)
         self.commit()
         return touched
+
+    def _record_span_usage(self, spans: list[Span]) -> None:
+        """One ``agent`` usage row per LLM span (keyed by span id, so re-ingest doesn't double count)."""
+        convs: dict[str, Conversation | None] = {}
+        for s in spans:
+            if nz.span_kind(s) != "llm":
+                continue
+            rows = self.query("SELECT conversation_id FROM spans WHERE span_id=?", (s.span_id,))
+            cid = rows[0]["conversation_id"] if rows else nz.conversation_key(s)
+            if cid not in convs:
+                convs[cid] = self.get_conversation(cid)
+            conv = convs[cid]
+            a = s.attributes
+            agent = nz.agent_name(s) or (conv.agent_name if conv else "")
+            team = nz.team(s) or (conv.team if conv else "") or None
+            model = a.get("gen_ai.response.model") or a.get("gen_ai.request.model") or a.get("llm.model_name")
+            self.record_usage(
+                agent=agent, model=str(model or "unknown"), source="agent", team=team, conversation_id=cid,
+                input_tokens=int(a.get("gen_ai.usage.input_tokens", a.get("llm.token_count.prompt", 0)) or 0),
+                output_tokens=int(a.get("gen_ai.usage.output_tokens",
+                                        a.get("llm.token_count.completion", 0)) or 0),
+                ts=s.start_ns / 1e9 if s.start_ns else None, usage_id=f"span:{s.span_id}",
+            )
 
     def _conv_for_trace(self, trace_id: str) -> str | None:
         rows = self.query("SELECT conversation_id FROM spans WHERE trace_id=? AND conversation_id<>? LIMIT 1",
@@ -256,6 +280,12 @@ class SQLStore:
              conv.ended_ns, len(conv.turns), conv.input_tokens, conv.output_tokens, int(conv.has_error),
              _j([asdict(t) for t in conv.turns]), _j(conv.metadata), now_s(), conv.team),
         )
+        if source == "record" and (conv.input_tokens or conv.output_tokens):
+            model = conv.metadata.get("model") or next((t.model for t in conv.turns if t.model), None)
+            self.record_usage(agent=conv.agent_name, model=str(model or "unknown"), source="agent",
+                              team=conv.team, input_tokens=conv.input_tokens, output_tokens=conv.output_tokens,
+                              conversation_id=conv.conversation_id, usage_id=f"conv:{conv.conversation_id}",
+                              ts=conv.started_ns / 1e9 if conv.started_ns else None)
         self.commit()
 
     @staticmethod
@@ -505,6 +535,19 @@ class SQLStore:
             sql += " AND team = ?"
             params.append(team)
         return self.query(sql + " ORDER BY ts", params)
+
+    def usage_recorder(self) -> Callable[[dict[str, Any]], None]:
+        """A ``LLMClient.on_usage`` hook that stores ambientq's own calls as ``source="ambientq"`` rows."""
+
+        def record(u: dict[str, Any]) -> None:
+            team = u.get("team") or None
+            self.record_usage(agent=str(u.get("agent") or ""), model=str(u.get("model") or ""),
+                              source="ambientq", purpose=str(u.get("purpose") or ""),
+                              team=str(team) if team else None, run_id=str(u.get("run_id") or ""),
+                              input_tokens=int(u.get("input_tokens") or 0),
+                              output_tokens=int(u.get("output_tokens") or 0))
+
+        return record
 
 
 def open_store(url: str, team_of: Callable[[str], str] | None = None) -> SQLStore:

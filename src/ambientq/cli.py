@@ -40,7 +40,7 @@ def _llm(cfg: Config, store: Any) -> Any:
     if cfg.get("llm", "base_url") == "mock":
         from ambientq.demo.mock_llm import MockLLM
         transport = MockLLM().transport
-    return LLMClient.from_config(cfg, transport=transport, audit=store.audit)
+    return LLMClient.from_config(cfg, transport=transport, audit=store.audit, on_usage=store.usage_recorder())
 
 
 def _print(data: Any, as_json: bool) -> None:

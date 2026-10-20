@@ -79,7 +79,7 @@ def run_demo(workdir: str | Path, *, http: bool = False, conversations_per_day: 
     cfg = Config.load(cfg_path)
     store = SQLStore(cfg.get("store", "url"))
     harness = Harness.load(cfg.get("harness", "path"))
-    llm = LLMClient.from_config(cfg, transport=transport, audit=store.audit)
+    llm = LLMClient.from_config(cfg, transport=transport, audit=store.audit, on_usage=store.usage_recorder())
     res = DemoResult(workdir=workdir, config_path=cfg_path)
     try:
         plan = [(1, ()), (2, ("tool_error_ignored",)), (3, ("tool_error_ignored",))]

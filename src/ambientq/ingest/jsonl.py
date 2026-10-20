@@ -53,6 +53,8 @@ def record_to_conversation(rec: dict[str, Any]) -> Conversation:
         metadata=dict(rec.get("metadata") or {}),
         team=str(rec.get("team") or ""),
     )
+    if rec.get("model"):
+        conv.metadata.setdefault("model", str(rec["model"]))
     turns: list[Turn] = []
     names: dict[str, str] = {}
     for raw in rec.get("messages", []):

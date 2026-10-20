@@ -147,6 +147,7 @@ class LLMClient:
         transport: Transport | None = None,
         budget: Budget | None = None,
         audit: Callable[[str, str, str, dict[str, Any]], None] | None = None,
+        on_usage: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -156,20 +157,23 @@ class LLMClient:
         self.json_mode = json_mode
         self.budget = budget or Budget()
         self._audit = audit
+        self.on_usage = on_usage
+        # Attribution for ``on_usage`` rows (``agent``, ``team``, ``run_id``); callers update it in place.
+        self.usage_context: dict[str, Any] = {}
         if insecure_skip_verify:
             log.warning("TLS verification to the LLM endpoint is DISABLED (insecure_skip_verify)")
         self.transport = transport or urllib_transport(timeout_s, ca_bundle, insecure_skip_verify)
 
     @classmethod
     def from_config(cls, cfg: Any, *, model: str | None = None, transport: Transport | None = None,
-                    budget: Budget | None = None, audit: Any = None) -> LLMClient:
+                    budget: Budget | None = None, audit: Any = None, on_usage: Any = None) -> LLMClient:
         llm = cfg.section("llm")
         return cls(
             base_url=llm["base_url"], model=model or llm["model"], api_key=cfg.secret("llm", "api_key_env"),
             temperature=float(llm.get("temperature", 0.0)), timeout_s=float(llm.get("timeout_s", 120)),
             ca_bundle=llm.get("ca_bundle"), insecure_skip_verify=bool(llm.get("insecure_skip_verify")),
             max_retries=int(llm.get("max_retries", 2)), json_mode=bool(llm.get("json_mode", True)),
-            transport=transport, budget=budget, audit=audit,
+            transport=transport, budget=budget, audit=audit, on_usage=on_usage,
         )
 
     def with_model(self, model: str | None) -> LLMClient:
@@ -177,7 +181,7 @@ class LLMClient:
             return self
         other = object.__new__(LLMClient)
         other.__dict__.update(self.__dict__)
-        other.model = model
+        other.model = model  # shares budget, audit, on_usage and usage_context with self
         return other
 
     def chat(self, messages: list[dict[str, Any]], *, purpose: str, tools: list[dict[str, Any]] | None = None,
@@ -220,8 +224,18 @@ class LLMClient:
                 "model": self.model, "prompt_sha256": sha256_text(json.dumps(messages, sort_keys=True)),
                 "input_tokens": usage.get("prompt_tokens", 0), "output_tokens": usage.get("completion_tokens", 0),
             })
-        return LLMResponse(content=msg.get("content") or "", tool_calls=msg.get("tool_calls") or [],
+        resp = LLMResponse(content=msg.get("content") or "", tool_calls=msg.get("tool_calls") or [],
                            usage=usage, model=data.get("model", self.model))
+        if self.on_usage:
+            try:
+                self.on_usage({"model": self.model, "purpose": purpose,
+                               "input_tokens": int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0),
+                               "output_tokens": int(usage.get("completion_tokens",
+                                                              usage.get("output_tokens", 0)) or 0),
+                               **self.usage_context})
+            except Exception:  # noqa: BLE001 - cost tracking must never fail a grading call
+                log.exception("usage hook failed")
+        return resp
 
     def chat_json(self, messages: list[dict[str, Any]], *, purpose: str, max_tokens: int = 2048) -> Any:
         resp = self.chat(messages, purpose=purpose, json_reply=True, max_tokens=max_tokens)
