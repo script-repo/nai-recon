@@ -92,6 +92,11 @@ def _j(v: Any) -> str:
     return json.dumps(v, sort_keys=True, default=str)
 
 
+def _prefix(s: str) -> str:
+    """A ``LIKE ... ESCAPE '\\'`` pattern matching ids that start with ``s`` literally."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 class SQLStore:
     """One class for both dialects; SQL is written in the common subset."""
 
@@ -119,8 +124,10 @@ class SQLStore:
 
     # -- plumbing ---------------------------------------------------------------
     def _sql(self, sql: str) -> str:
+        """Translate common-subset SQL (``?`` placeholders) to the store's dialect."""
         if self.dialect == "postgres":
-            sql = sql.replace("?", "%s").replace("DOUBLE PRECISION", "DOUBLE PRECISION")
+            # psycopg uses %s placeholders, so a literal % must be doubled first.
+            sql = sql.replace("%", "%%").replace("?", "%s")
         else:
             sql = sql.replace("DOUBLE PRECISION", "REAL").replace("BIGINT", "INTEGER")
         return sql
@@ -128,7 +135,14 @@ class SQLStore:
     def execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
         with self._lock:
             cur = self.conn.cursor()
-            cur.execute(self._sql(sql), tuple(params))
+            try:
+                cur.execute(self._sql(sql), tuple(params))
+            except Exception:
+                # PostgreSQL aborts the whole transaction on an error; roll back so the
+                # connection stays usable (SQLite only fails the one statement).
+                if self.dialect == "postgres":
+                    self.conn.rollback()
+                raise
             return cur
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
@@ -144,7 +158,8 @@ class SQLStore:
     def columns(self, table: str) -> set[str]:
         if self.dialect == "sqlite":
             return {r["name"] for r in self.query(f"PRAGMA table_info({table})")}
-        rows = self.query("SELECT column_name FROM information_schema.columns WHERE table_name=?", (table,))
+        rows = self.query("SELECT column_name FROM information_schema.columns "
+                          "WHERE table_schema = current_schema() AND table_name=?", (table,))
         return {r["column_name"] for r in rows}
 
     def migrate(self) -> None:
@@ -414,8 +429,8 @@ class SQLStore:
         return [self._row_to_insight(r) for r in self.query(sql, params)]
 
     def get_insight(self, insight_id: str) -> Insight | None:
-        rows = self.query("SELECT * FROM insights WHERE insight_id=? OR insight_id LIKE ?",
-                          (insight_id, insight_id + "%"))
+        rows = self.query("SELECT * FROM insights WHERE insight_id=? OR insight_id LIKE ? ESCAPE '\\'",
+                          (insight_id, _prefix(insight_id)))
         return self._row_to_insight(rows[0]) if len(rows) == 1 else None
 
     def insight_by_fingerprint(self, fp: str) -> Insight | None:
@@ -470,8 +485,8 @@ class SQLStore:
         return [self._proposal_row(r) for r in self.query(sql + " ORDER BY created_at DESC", params)]
 
     def get_proposal(self, proposal_id: str) -> dict[str, Any] | None:
-        rows = self.query("SELECT * FROM proposals WHERE proposal_id=? OR proposal_id LIKE ?",
-                          (proposal_id, proposal_id + "%"))
+        rows = self.query("SELECT * FROM proposals WHERE proposal_id=? OR proposal_id LIKE ? ESCAPE '\\'",
+                          (proposal_id, _prefix(proposal_id)))
         if len(rows) != 1:
             return None
         return self._proposal_row(rows[0])

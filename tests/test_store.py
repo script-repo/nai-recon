@@ -103,3 +103,13 @@ def test_v01_database_upgrades_in_place(tmp_path):
         assert len(rows) == 1 and rows[0]["team"] == "platform"
     finally:
         s.close()
+
+
+def test_prefix_lookup_treats_like_wildcards_literally(store):
+    for pid in ("prp_abc", "prpXabd"):
+        store.save_proposal({"proposal_id": pid, "insight_id": "i", "status": "DRAFT"})
+    assert store.get_proposal("prp_a")["proposal_id"] == "prp_abc"  # "_" is not a wildcard
+    assert store.get_proposal("prp%") is None
+    s = SQLStore.__new__(SQLStore)
+    s.dialect = "postgres"
+    assert s._sql("SELECT 'a%' LIKE ?") == "SELECT 'a%%' LIKE %s"
