@@ -1,0 +1,44 @@
+# ambientq configuration for an agent served by Nutanix Enterprise AI.
+# Secrets are never written here: only the names of environment variables that hold them.
+
+store:
+  url: sqlite:///var/lib/ambientq/ambientq.db      # or postgresql://user@host/db (pip install 'ambientq[postgres]')
+
+harness:
+  path: ../my-agent/harness                         # directory with harness.yaml, inside the agent's git repo
+
+llm:
+  # NAI endpoint URL as shown under "View Sample Request", without /chat/completions.
+  base_url: https://nai.example.local/api/v1
+  api_key_env: NAI_API_KEY                          # export NAI_API_KEY=<endpoint API key>
+  model: llama-3-1-70b-judge                        # the NAI endpoint name
+  verifier_model: null                              # optional: a second (larger) endpoint for the verifier
+  ca_bundle: /etc/ssl/certs/nai-ca.pem              # NAI clusters often use a private CA
+  timeout_s: 120
+  temperature: 0
+
+sampling: {rate: 0.2, seed: ambientq, max_priority: 50}
+budget: {max_tokens_per_run: 400000, max_conversations_per_run: 200}
+judge:
+  max_findings: 8
+  min_confidence: 0.5
+  goal: null                                        # override harness.yaml's goal
+verifier: {enabled: true, llm: true}
+insights: {similarity: 0.5, resolve_after_runs: 2}
+replay:
+  enabled: true
+  model: llama-3-1-8b-instruct                      # the NAI endpoint your agent itself uses
+  max_conversations: 5
+  control_sample: 2
+
+forge:                                              # only for `propose --open-pr`
+  kind: gitlab                                      # github | gitlab | gitea
+  api_url: https://gitlab.example.local/api/v4
+  repo: ai/my-agent
+  token_env: FORGE_TOKEN
+  base_branch: main
+
+server: {host: 0.0.0.0, port: 8080, ingest_token_env: AMBIENTQ_INGEST_TOKEN}
+checks:
+  disabled: []
+  plugins: ["my_checks:no_competitor_names"]        # module:function, or the ambientq.checks entry point group

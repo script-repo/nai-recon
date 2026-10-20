@@ -1,0 +1,59 @@
+image:
+  repository: ghcr.io/your-org/ambientq
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# The NAI (or any OpenAI-compatible) endpoint used as judge / verifier / fixer.
+nai:
+  baseUrl: https://nai.example.local/api/v1   # NAI endpoint URL without /chat/completions
+  model: llama-3-1-70b-judge                   # NAI endpoint name
+  verifierModel: ""                            # optional second endpoint for the verifier
+  replayModel: ""                              # the agent's own endpoint, for replay
+  # Existing Secret holding the NAI API key (key: apiKey). Create it yourself:
+  #   kubectl create secret generic nai-judge-key --from-literal=apiKey=...
+  apiKeySecret: nai-judge-key
+  # Optional ConfigMap with the NAI cluster CA (key: ca.crt) for private PKI.
+  caConfigMap: ""
+
+# Agent harness (prompts, tools, guardrails) checked out from git by an init container.
+harness:
+  repo: ""                 # e.g. https://git.example.local/ai/nkp-ops-agent.git
+  ref: main
+  subPath: harness         # directory inside the repo that holds harness.yaml
+  gitSecret: ""            # optional Secret with key 'token' for private repos
+
+config:
+  sampling: {rate: 0.2, seed: ambientq, max_priority: 50}
+  budget: {max_tokens_per_run: 400000, max_conversations_per_run: 200}
+  judge: {max_findings: 8, min_confidence: 0.5}
+  verifier: {enabled: true, llm: true}
+  insights: {similarity: 0.5, resolve_after_runs: 2}
+  replay: {enabled: true, max_conversations: 5, control_sample: 2}
+
+# Optional bearer token agents must send to POST /v1/traces (Secret key: token).
+ingestTokenSecret: ""
+
+# Scheduled evaluations (Kubernetes CronJob running `ambientq evaluate`).
+schedule:
+  enabled: true
+  cron: "0 * * * *"
+
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClass: ""          # e.g. nutanix-volume
+  # Set to a PostgreSQL URL secret to use Postgres instead of SQLite (Secret key: url).
+  postgresUrlSecret: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+networkPolicy:
+  enabled: true
+  # CIDRs the pod may reach besides DNS: the NAI endpoint (and your git server).
+  egressCIDRs: []
+
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {cpu: "1", memory: 1Gi}

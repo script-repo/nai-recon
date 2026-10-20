@@ -1,0 +1,24 @@
+# OpenTelemetry Collector pipeline: receive agent traces, forward GenAI spans to ambientq (OTLP/HTTP JSON).
+receivers:
+  otlp:
+    protocols:
+      grpc: {endpoint: 0.0.0.0:4317}
+      http: {endpoint: 0.0.0.0:4318}
+processors:
+  batch: {}
+  filter/genai:                       # keep only agent/LLM/tool spans
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["gen_ai.operation.name"] == nil and attributes["openinference.span.kind"] == nil and attributes["gen_ai.conversation.id"] == nil'
+exporters:
+  otlphttp/ambientq:
+    endpoint: http://ambientq.ai-quality.svc:8080
+    encoding: json
+    headers: {Authorization: "Bearer ${env:AMBIENTQ_INGEST_TOKEN}"}
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [filter/genai, batch]
+      exporters: [otlphttp/ambientq]

@@ -1,0 +1,265 @@
+# Rendered from deploy/helm/ambientq with default values (helm template ambientq deploy/helm/ambientq -n ai-quality).
+# Before applying: create the NAI key Secret, set the NAI URL/model in the ConfigMap, and an image you have pushed.
+#   kubectl create namespace ai-quality
+#   kubectl -n ai-quality create secret generic nai-judge-key --from-literal=apiKey=<NAI endpoint API key>
+---
+# Sovereignty guardrail: ambientq may only talk to DNS and the CIDRs you list (NAI, git).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ambientq-ambientq
+  labels:
+    app.kubernetes.io/name: ambientq
+    app.kubernetes.io/instance: ambientq
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ambientq
+      app.kubernetes.io/instance: ambientq
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{port: 8080, protocol: TCP}]
+  egress:
+    - ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ambientq-ambientq
+  labels:
+    app.kubernetes.io/name: ambientq
+    app.kubernetes.io/instance: ambientq
+    app.kubernetes.io/version: "0.1.0"
+data:
+  ambientq.yaml: |
+    store: {url: "sqlite:////data/ambientq.db"}
+    harness: {path: "/harness/repo/harness"}
+    llm:
+      base_url: "https://nai.example.local/api/v1"
+      api_key_env: NAI_API_KEY
+      model: "llama-3-1-70b-judge"
+      verifier_model: ""
+    replay:
+      model: ""
+      control_sample: 2
+      enabled: true
+      max_conversations: 5
+    server: {host: 0.0.0.0, port: 8080, ingest_token_env: AMBIENTQ_INGEST_TOKEN}
+    budget:
+      max_conversations_per_run: 200
+      max_tokens_per_run: 400000
+    insights:
+      resolve_after_runs: 2
+      similarity: 0.5
+    judge:
+      max_findings: 8
+      min_confidence: 0.5
+    sampling:
+      max_priority: 50
+      rate: 0.2
+      seed: ambientq
+    verifier:
+      enabled: true
+      llm: true
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ambientq-ambientq-data
+  labels:
+    app.kubernetes.io/name: ambientq
+    app.kubernetes.io/instance: ambientq
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 5Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ambientq-ambientq
+  labels:
+    app.kubernetes.io/name: ambientq
+    app.kubernetes.io/instance: ambientq
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ambientq
+    app.kubernetes.io/instance: ambientq
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ambientq-ambientq
+  labels:
+    app.kubernetes.io/name: ambientq
+    app.kubernetes.io/instance: ambientq
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  replicas: 1   # SQLite: single writer. Use Postgres before scaling out.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ambientq
+      app.kubernetes.io/instance: ambientq
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ambientq
+        app.kubernetes.io/instance: ambientq
+      annotations:
+        checksum/config: 492297a1f3590a8cf4611a1c878110c44f9b6dd584deec7aec44805ac4b2a41d
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {fsGroup: 10001}
+      initContainers:
+        
+        - name: harness
+          image: "ghcr.io/your-org/ambientq:0.1.0"
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              URL="https://git.example.local/ai/nkp-ops-agent.git"
+              if [ -n "$GIT_TOKEN" ]; then URL=$(echo "$URL" | sed "s#https://#https://x-access-token:${GIT_TOKEN}@#"); fi
+              rm -rf /harness/repo && git clone --depth 50 --branch main "$URL" /harness/repo
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: harness, mountPath: /harness}
+            - {name: tmp, mountPath: /tmp}
+      containers:
+        - name: ambientq
+          image: "ghcr.io/your-org/ambientq:0.1.0"
+          imagePullPolicy: IfNotPresent
+          args: ["serve"]
+          env:
+            - name: AMBIENTQ_CONFIG
+              value: /etc/ambientq/ambientq.yaml
+            - name: NAI_API_KEY
+              valueFrom: {secretKeyRef: {name: nai-judge-key, key: apiKey}}
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 30}
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: config, mountPath: /etc/ambientq/ambientq.yaml, subPath: ambientq.yaml}
+            - {name: data, mountPath: /data}
+            - {name: harness, mountPath: /harness}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: config, configMap: {name: ambientq-ambientq}}
+        - {name: data, persistentVolumeClaim: {claimName: ambientq-ambientq-data}}
+        - {name: harness, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ambientq-ambientq-evaluate
+  labels:
+    app.kubernetes.io/name: ambientq
+    app.kubernetes.io/instance: ambientq
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: ambientq
+            app.kubernetes.io/instance: ambientq
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext: {fsGroup: 10001}
+          # Shares the SQLite volume with the server pod (RWO): schedule on the same node, or use Postgres.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: ambientq
+                      app.kubernetes.io/instance: ambientq
+                  topologyKey: kubernetes.io/hostname
+          initContainers:
+            
+            - name: harness
+              image: "ghcr.io/your-org/ambientq:0.1.0"
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -e
+                  URL="https://git.example.local/ai/nkp-ops-agent.git"
+                  if [ -n "$GIT_TOKEN" ]; then URL=$(echo "$URL" | sed "s#https://#https://x-access-token:${GIT_TOKEN}@#"); fi
+                  rm -rf /harness/repo && git clone --depth 50 --branch main "$URL" /harness/repo
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                capabilities: {drop: ["ALL"]}
+                seccompProfile: {type: RuntimeDefault}
+              volumeMounts:
+                - {name: harness, mountPath: /harness}
+                - {name: tmp, mountPath: /tmp}
+          containers:
+            - name: evaluate
+              image: "ghcr.io/your-org/ambientq:0.1.0"
+              args: ["evaluate", "--trigger", "schedule"]
+              env:
+                - name: AMBIENTQ_CONFIG
+                  value: /etc/ambientq/ambientq.yaml
+                - name: NAI_API_KEY
+                  valueFrom: {secretKeyRef: {name: nai-judge-key, key: apiKey}}
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                capabilities: {drop: ["ALL"]}
+                seccompProfile: {type: RuntimeDefault}
+              volumeMounts:
+                - {name: config, mountPath: /etc/ambientq/ambientq.yaml, subPath: ambientq.yaml}
+                - {name: data, mountPath: /data}
+                - {name: harness, mountPath: /harness}
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - {name: config, configMap: {name: ambientq-ambientq}}
+            - {name: data, persistentVolumeClaim: {claimName: ambientq-ambientq-data}}
+            - {name: harness, emptyDir: {}}
+            - {name: tmp, emptyDir: {}}

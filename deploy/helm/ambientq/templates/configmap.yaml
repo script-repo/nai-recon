@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ambientq.name" . }}
+  labels: {{- include "ambientq.labels" . | nindent 4 }}
+data:
+  ambientq.yaml: |
+    store: {url: "sqlite:////data/ambientq.db"}
+    harness: {path: "/harness/repo/{{ .Values.harness.subPath }}"}
+    llm:
+      base_url: {{ .Values.nai.baseUrl | quote }}
+      api_key_env: NAI_API_KEY
+      model: {{ .Values.nai.model | quote }}
+      verifier_model: {{ .Values.nai.verifierModel | default "" | quote }}
+      {{- if .Values.nai.caConfigMap }}
+      ca_bundle: /etc/ambientq/ca/ca.crt
+      {{- end }}
+    replay:
+      model: {{ .Values.nai.replayModel | default "" | quote }}
+      {{- toYaml (omit .Values.config.replay "model") | nindent 6 }}
+    server: {host: 0.0.0.0, port: 8080, ingest_token_env: AMBIENTQ_INGEST_TOKEN}
+    {{- toYaml (omit .Values.config "replay") | nindent 4 }}

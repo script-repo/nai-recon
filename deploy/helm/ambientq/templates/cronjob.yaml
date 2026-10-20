@@ -1,0 +1,59 @@
+{{- if .Values.schedule.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "ambientq.name" . }}-evaluate
+  labels: {{- include "ambientq.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.schedule.cron | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels: {{- include "ambientq.selector" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext: {fsGroup: 10001}
+          {{- if .Values.persistence.enabled }}
+          # Shares the SQLite volume with the server pod (RWO): schedule on the same node, or use Postgres.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels: {{- include "ambientq.selector" . | nindent 22 }}
+                  topologyKey: kubernetes.io/hostname
+          {{- end }}
+          initContainers: {{- include "ambientq.gitInit" . | nindent 12 }}
+          containers:
+            - name: evaluate
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              args: ["evaluate", "--trigger", "schedule"]
+              env: {{- include "ambientq.env" . | nindent 16 }}
+              resources: {{- toYaml .Values.resources | nindent 16 }}
+              securityContext: {{- include "ambientq.securityContext" . | nindent 16 }}
+              volumeMounts:
+                - {name: config, mountPath: /etc/ambientq/ambientq.yaml, subPath: ambientq.yaml}
+                - {name: data, mountPath: /data}
+                - {name: harness, mountPath: /harness}
+                - {name: tmp, mountPath: /tmp}
+                {{- if .Values.nai.caConfigMap }}
+                - {name: ca, mountPath: /etc/ambientq/ca}
+                {{- end }}
+          volumes:
+            - {name: config, configMap: {name: {{ include "ambientq.name" . }}}}
+            {{- if .Values.persistence.enabled }}
+            - {name: data, persistentVolumeClaim: {claimName: {{ include "ambientq.name" . }}-data}}
+            {{- else }}
+            - {name: data, emptyDir: {}}
+            {{- end }}
+            - {name: harness, emptyDir: {}}
+            - {name: tmp, emptyDir: {}}
+            {{- if .Values.nai.caConfigMap }}
+            - {name: ca, configMap: {name: {{ .Values.nai.caConfigMap }}}}
+            {{- end }}
+{{- end }}

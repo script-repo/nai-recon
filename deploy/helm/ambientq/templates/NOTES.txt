@@ -1,0 +1,9 @@
+ambientq is running beside your agents.
+
+  Dashboard:  kubectl port-forward svc/{{ include "ambientq.name" . }} 8080:{{ .Values.service.port }}  ->  http://localhost:8080
+  OTLP/HTTP:  http://{{ include "ambientq.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/v1/traces
+              (set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT on your agents; protocol http/json)
+
+Judge model: {{ .Values.nai.model }} at {{ .Values.nai.baseUrl }}
+Nothing leaves the cluster except calls to that endpoint{{ if .Values.harness.repo }} and your git server{{ end }}.
+Patches are only ever proposed (branch/PR); a human approves and merges.
