@@ -1,10 +1,19 @@
 """Replay failing conversations against a patched harness and re-grade them.
 
-Single-step replay: the conversation is cut just before the first assistant
-turn the insight's evidence points at; the agent's model (on NAI) is asked for
-its next response under the original harness (control) and the patched one;
-both are graded with the same checks and judge. Tool results earlier in the
-conversation are replayed from the trace.
+The conversation is cut just before the first assistant turn the insight's
+evidence points at. From there the agent's model (on NAI) is asked to carry on
+under the original harness (control) and the patched one, and both
+continuations are graded with the same checks and judge.
+
+Two modes:
+
+* ``multi`` (default): the agent runs step by step until it gives a final
+  answer (or ``max_steps``). Every tool call it makes is answered from the
+  conversation's **tool-result tape**: the results recorded at ingest, matched
+  by tool name and arguments. Calls with no exact match follow the
+  ``unmatched`` policy (``nearest``, ``error`` or ``stop``) and are flagged.
+  Real tools are never called.
+* ``single``: only the agent's next response is regenerated (v0.1 behaviour).
 """
 
 from __future__ import annotations
@@ -69,23 +78,178 @@ def cut_index(conv: Conversation, findings: list[Finding]) -> int:
     return min(last_user + 1, len(conv.turns))
 
 
-def regenerate(llm: LLMClient, h: Harness, conv: Conversation, cut: int) -> Conversation:
-    prefix = conv.turns[:cut]
-    resp = llm.chat(turns_to_messages(h.system_prompt(), prefix), purpose="replay",
-                    tools=[t.openai() for t in h.tools] or None, max_tokens=1024)
-    turns = [Turn.from_dict(t.to_dict()) for t in prefix]
+UNMATCHED_POLICIES = ("nearest", "error", "stop")
+NOT_RECORDED = json.dumps({"error": "not recorded: ambientq replay has no recorded result for this tool call"})
+
+
+def canonical_args(args: dict[str, Any] | None) -> str:
+    return json.dumps(args or {}, sort_keys=True, separators=(",", ":"), default=str)
+
+
+@dataclass
+class TapeEntry:
+    tool: str
+    args: dict[str, Any]
+    result: str
+    is_error: bool
+    used: bool = False
+
+
+@dataclass
+class TapeAnswer:
+    content: str
+    is_error: bool
+    match: str  # exact | nearest | not_recorded | stop
+    recorded_args: dict[str, Any] | None = None
+
+
+@dataclass
+class ToolTape:
+    """Recorded tool results of one conversation, keyed by tool name and arguments."""
+
+    entries: list[TapeEntry] = field(default_factory=list)
+
+    @classmethod
+    def from_conversation(cls, conv: Conversation) -> ToolTape:
+        results = {t.tool_call_id: t for t in conv.turns if t.role == "tool" and t.tool_call_id}
+        loose = [t for t in conv.turns if t.role == "tool" and not t.tool_call_id]
+        tape = cls()
+        for call in conv.tool_calls:
+            res = results.get(call.tool_call_id) if call.tool_call_id else None
+            if res is None:
+                # No call id: the next unclaimed result after the call (same tool name if known).
+                res = next((t for t in loose if t.index > call.index
+                            and (not t.tool_name or t.tool_name == call.tool_name)), None)
+                if res is not None:
+                    loose.remove(res)
+            if res is not None:
+                tape.entries.append(TapeEntry(call.tool_name or "", dict(call.tool_args or {}), res.content,
+                                              res.is_error))
+        return tape
+
+    def fresh(self) -> ToolTape:
+        return ToolTape([TapeEntry(e.tool, e.args, e.result, e.is_error) for e in self.entries])
+
+    def answer(self, tool: str, args: dict[str, Any] | None, policy: str = "nearest") -> TapeAnswer:
+        key = canonical_args(args)
+        same = [e for e in self.entries if e.tool == tool]
+        for e in same:
+            if not e.used and canonical_args(e.args) == key:
+                e.used = True
+                return TapeAnswer(e.result, e.is_error, "exact", e.args)
+        if policy == "stop":
+            return TapeAnswer("", False, "stop")
+        if policy == "nearest" and same:
+            fresh = [e for e in same if not e.used] or same
+            best = max(fresh, key=lambda e: _arg_similarity(e.args, args or {}))
+            best.used = True
+            return TapeAnswer(best.result, best.is_error, "nearest", best.args)
+        return TapeAnswer(NOT_RECORDED, True, "not_recorded")
+
+
+def _arg_similarity(a: dict[str, Any], b: dict[str, Any]) -> float:
+    keys = set(a) | set(b)
+    if not keys:
+        return 1.0
+    same_vals = sum(1 for k in keys if k in a and k in b and a[k] == b[k])
+    same_keys = len(set(a) & set(b))
+    return (same_vals + 0.5 * same_keys) / len(keys)
+
+
+def _append_response(turns: list[Turn], resp: Any) -> list[Turn]:
+    """Append the model's response; return the new tool-call turns."""
     if resp.content:
         turns.append(Turn(index=len(turns), role="assistant", content=resp.content, model=resp.model))
+    calls = []
     for tc in resp.tool_calls:
         fn = tc.get("function", {})
         try:
             args = json.loads(fn.get("arguments") or "{}")
         except json.JSONDecodeError:
             args = {"_raw": fn.get("arguments")}
-        turns.append(Turn(index=len(turns), role="assistant", tool_name=fn.get("name"),
-                          tool_call_id=tc.get("id"), tool_args=args, model=resp.model))
+        if not isinstance(args, dict):
+            args = {"_raw": args}
+        t = Turn(index=len(turns), role="assistant", tool_name=fn.get("name"), tool_call_id=tc.get("id"),
+                 tool_args=args, model=resp.model)
+        turns.append(t)
+        calls.append(t)
+    return calls
+
+
+def continue_conversation(llm: LLMClient, h: Harness, conv: Conversation, cut: int, tape: ToolTape, *,
+                          max_steps: int = 8, unmatched: str = "nearest") -> Conversation:
+    """Multi-step replay from ``cut``: run the agent until it answers, feeding it recorded tool results."""
+    if unmatched not in UNMATCHED_POLICIES:
+        raise ValueError(f"replay.unmatched must be one of {UNMATCHED_POLICIES}, got {unmatched!r}")
+    turns = [Turn.from_dict(t.to_dict()) for t in conv.turns[:cut]]
+    tools = [t.openai() for t in h.tools] or None
+    flags: list[dict[str, Any]] = []
+    steps, reason = 0, "max_steps"
+    while steps < max_steps:
+        resp = llm.chat(turns_to_messages(h.system_prompt(), turns), purpose="replay", tools=tools,
+                        max_tokens=1024)
+        steps += 1
+        calls = _append_response(turns, resp)
+        if not calls:
+            reason = "final_answer"
+            break
+        stop = False
+        for call in calls:
+            name = call.tool_name or ""
+            ans = tape.answer(name, call.tool_args, unmatched)
+            if name not in h.tool_names():
+                flags.append({"tool": name, "args": call.tool_args, "match": ans.match, "undefined_tool": True})
+            elif ans.match != "exact":
+                flags.append({"tool": name, "args": call.tool_args, "match": ans.match,
+                              "recorded_args": ans.recorded_args})
+            if ans.match == "stop":
+                stop = True
+                break
+            turns.append(Turn(index=len(turns), role="tool", content=ans.content, tool_name=name,
+                              tool_call_id=call.tool_call_id, is_error=ans.is_error))
+        if stop:
+            reason = "unmatched_call"
+            break
     return Conversation(conversation_id=f"{conv.conversation_id}~replay", agent_name=conv.agent_name,
-                        turns=turns, metadata={"replay_of": conv.conversation_id, "cut": cut})
+                        turns=turns, team=conv.team,
+                        metadata={"replay_of": conv.conversation_id, "cut": cut, "mode": "multi",
+                                  "steps": steps, "stop_reason": reason, "unmatched_calls": flags})
+
+
+def regenerate(llm: LLMClient, h: Harness, conv: Conversation, cut: int) -> Conversation:
+    prefix = conv.turns[:cut]
+    resp = llm.chat(turns_to_messages(h.system_prompt(), prefix), purpose="replay",
+                    tools=[t.openai() for t in h.tools] or None, max_tokens=1024)
+    turns = [Turn.from_dict(t.to_dict()) for t in prefix]
+    _append_response(turns, resp)
+    return Conversation(conversation_id=f"{conv.conversation_id}~replay", agent_name=conv.agent_name,
+                        turns=turns, team=conv.team,
+                        metadata={"replay_of": conv.conversation_id, "cut": cut, "mode": "single", "steps": 1,
+                                  "stop_reason": "single_step", "unmatched_calls": []})
+
+
+@dataclass
+class Replayer:
+    """How continuations are produced: mode, step limit and the unmatched-call policy."""
+
+    mode: str = "multi"
+    max_steps: int = 8
+    unmatched: str = "nearest"
+
+    @classmethod
+    def from_config(cls, cfg: Any) -> Replayer:
+        return cls(mode=str(cfg.get("replay", "mode", "multi") or "multi"),
+                   max_steps=int(cfg.get("replay", "max_steps", 8) or 8),
+                   unmatched=str(cfg.get("replay", "unmatched", "nearest") or "nearest"))
+
+    def run(self, llm: LLMClient, h: Harness, conv: Conversation, cut: int,
+            tape: ToolTape | None = None) -> Conversation:
+        if self.mode == "single":
+            return regenerate(llm, h, conv, cut)
+        if self.mode != "multi":
+            raise ValueError(f"replay.mode must be 'multi' or 'single', got {self.mode!r}")
+        tape = (tape or ToolTape.from_conversation(conv)).fresh()
+        return continue_conversation(llm, h, conv, cut, tape, max_steps=self.max_steps, unmatched=self.unmatched)
 
 
 def matches_insight(f: Finding, ins: Insight) -> bool:
@@ -96,12 +260,17 @@ def matches_insight(f: Finding, ins: Insight) -> bool:
     return f.rubric_id == ins.rubric_id or jaccard(f.expected, ins.expected) >= 0.3 or not ins.rubric_id.startswith("R-P")
 
 
+def _complete(conv: Conversation) -> bool:
+    return conv.metadata.get("stop_reason") == "final_answer"
+
+
 def grade(conv: Conversation, h: Harness, judge: LLMClient | None, checks: dict[str, Any]) -> list[Finding]:
     rubric = build_rubric(h)
     found = []
-    # The replay ends at the regenerated turn, so "conversation ended early" checks don't apply.
-    for f in run_checks(conv, h, {k: v for k, v in checks.items()
-                                  if k not in ("empty_final_answer", "unanswered_tool_call")}):
+    # A continuation that didn't reach a final answer (single-step, step limit, unmatched stop)
+    # ended early on purpose, so "conversation ended early" checks don't apply to it.
+    skip = () if _complete(conv) else ("empty_final_answer", "unanswered_tool_call")
+    for f in run_checks(conv, h, {k: v for k, v in checks.items() if k not in skip}):
         f.verified, f.verifier_note = check_evidence(f, conv, rubric)
         found.append(f)
     if judge is not None:
@@ -114,6 +283,7 @@ def grade(conv: Conversation, h: Harness, judge: LLMClient | None, checks: dict[
 class ReplayReport:
     rows: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    mode: str = "multi"
 
     @property
     def fixed(self) -> int:
@@ -131,21 +301,37 @@ class ReplayReport:
     def improved(self) -> bool:
         return self.fixed > 0 and self.regressions == 0
 
+    @property
+    def unmatched(self) -> int:
+        return sum(len(r.get("unmatched_calls") or []) for r in self.rows)
+
     def to_dict(self) -> dict[str, Any]:
-        return {"fixed": self.fixed, "still_failing": self.still_failing, "regressions": self.regressions,
-                "improved": self.improved, "rows": self.rows, "errors": self.errors}
+        return {"mode": self.mode, "fixed": self.fixed, "still_failing": self.still_failing,
+                "regressions": self.regressions, "improved": self.improved, "unmatched_calls": self.unmatched,
+                "rows": self.rows, "errors": self.errors}
+
+
+
+def _trace(before: Conversation, after: Conversation) -> dict[str, Any]:
+    """Replay bookkeeping for a report row: steps taken, why it stopped, and flagged tool calls."""
+    return {"steps": [before.metadata.get("steps"), after.metadata.get("steps")],
+            "stop_reason": [before.metadata.get("stop_reason"), after.metadata.get("stop_reason")],
+            "unmatched_calls": [{"side": side, **u} for side, c in (("original", before), ("patched", after))
+                                for u in c.metadata.get("unmatched_calls") or []]}
 
 
 def replay(insight: Insight, failing: list[tuple[Conversation, list[Finding]]], original: Harness,
            patched: Harness, agent_llm: LLMClient, judge_llm: LLMClient | None,
-           controls: list[Conversation] | None = None, checks: dict[str, Any] | None = None) -> ReplayReport:
+           controls: list[Conversation] | None = None, checks: dict[str, Any] | None = None,
+           replayer: Replayer | None = None) -> ReplayReport:
     checks = checks if checks is not None else load_checks()
-    rep = ReplayReport()
+    replayer = replayer or Replayer()
+    rep = ReplayReport(mode=replayer.mode)
     for conv, fs in failing:
         cut = cut_index(conv, fs)
         try:
-            before = regenerate(agent_llm, original, conv, cut)
-            after = regenerate(agent_llm, patched, conv, cut)
+            before = replayer.run(agent_llm, original, conv, cut)
+            after = replayer.run(agent_llm, patched, conv, cut)
             bf = any(matches_insight(f, insight) for f in grade(before, original, judge_llm, checks))
             af = any(matches_insight(f, insight) for f in grade(after, patched, judge_llm, checks))
         except LLMError as exc:
@@ -153,12 +339,13 @@ def replay(insight: Insight, failing: list[tuple[Conversation, list[Finding]]], 
             continue
         rep.rows.append({"kind": "failing", "conversation_id": conv.conversation_id, "cut": cut,
                          "before_fail": bf, "after_fail": af,
-                         "before_reply": _reply(before, cut), "after_reply": _reply(after, cut)})
+                         "before_reply": _reply(before, cut), "after_reply": _reply(after, cut),
+                         **_trace(before, after)})
     for conv in controls or []:
         cut = cut_index(conv, [])
         try:
-            before = regenerate(agent_llm, original, conv, cut)
-            after = regenerate(agent_llm, patched, conv, cut)
+            before = replayer.run(agent_llm, original, conv, cut)
+            after = replayer.run(agent_llm, patched, conv, cut)
             nb = sum(1 for f in grade(before, original, judge_llm, checks) if f.verified)
             na = sum(1 for f in grade(after, patched, judge_llm, checks) if f.verified)
         except LLMError as exc:
@@ -166,12 +353,16 @@ def replay(insight: Insight, failing: list[tuple[Conversation, list[Finding]]], 
             continue
         rep.rows.append({"kind": "control", "conversation_id": conv.conversation_id, "cut": cut,
                          "before_new_findings": nb, "after_new_findings": na,
-                         "after_reply": _reply(after, cut)})
+                         "before_reply": _reply(before, cut), "after_reply": _reply(after, cut),
+                         **_trace(before, after)})
     return rep
 
 
 def _reply(conv: Conversation, cut: int) -> str:
     parts = []
     for t in conv.turns[cut:]:
-        parts.append(t.content if t.content else f"<call {t.tool_name}({json.dumps(t.tool_args or {})})>")
-    return " ".join(parts)[:400]
+        if t.role == "tool":
+            parts.append(f"<result {t.tool_name}: {t.content[:80]}>")
+        else:
+            parts.append(t.content if t.content else f"<call {t.tool_name}({json.dumps(t.tool_args or {})})>")
+    return " ".join(parts)[:600]

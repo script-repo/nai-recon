@@ -20,7 +20,7 @@ from ambientq.harness import Harness
 from ambientq.investigate import investigate
 from ambientq.llm import LLMClient
 from ambientq.models import ProposalStatus, new_id, now_s
-from ambientq.replay import replay
+from ambientq.replay import Replayer, replay
 from ambientq.store import SQLStore
 
 
@@ -117,7 +117,8 @@ def propose(store: SQLStore, cfg: Config, insight_id: str, harness: Harness, llm
         controls = [c for c in store.list_conversations(agent=harness.agent) if c.conversation_id not in flagged]
         controls = controls[: int(cfg.get("replay", "control_sample", 2))]
         agent = agent_llm or llm.with_model(cfg.get("replay", "model"))
-        rep = replay(ins, failing, harness, patched, agent, llm, controls=controls)
+        rep = replay(ins, failing, harness, patched, agent, llm, controls=controls,
+                     replayer=Replayer.from_config(cfg))
         rep_dict = rep.to_dict()
         proposal["replay"] = rep_dict
         proposal["status"] = str(ProposalStatus.PENDING_APPROVAL if rep.improved else ProposalStatus.NOT_IMPROVED)

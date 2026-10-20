@@ -144,6 +144,8 @@ def cmd_propose(args: argparse.Namespace) -> int:
 
     cfg, store = _ctx(args)
     harness = Harness.load(args.harness or cfg.get("harness", "path"))
+    if args.replay_mode:
+        cfg.data["replay"]["mode"] = args.replay_mode
     p = propose(store, cfg, args.insight, harness, _llm(cfg, store), do_replay=not args.no_replay,
                 branch=args.branch, open_pr=args.open_pr)
     if args.json:
@@ -153,7 +155,8 @@ def cmd_propose(args: argparse.Namespace) -> int:
     print(f"target:   {p['file']}:{p['start_line']}-{p['end_line']}")
     if p.get("replay"):
         r = p["replay"]
-        print(f"replay:   fixed {r['fixed']}, still failing {r['still_failing']}, regressions {r['regressions']}")
+        print(f"replay:   fixed {r['fixed']}, still failing {r['still_failing']}, regressions {r['regressions']}"
+              f" ({r.get('mode', 'single')}-step, {r.get('unmatched_calls', 0)} unmatched tool call(s) flagged)")
     if p.get("branch"):
         print(f"branch:   {p['branch']}")
     if p.get("pr_url"):
@@ -255,6 +258,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("insight")
     s.add_argument("--harness")
     s.add_argument("--no-replay", action="store_true")
+    s.add_argument("--replay-mode", choices=["multi", "single"],
+                   help="multi: run to a final answer on recorded tool results (default); single: next turn only")
     s.add_argument("--branch", action="store_true", help="commit the patch to a new branch in the harness repo")
     s.add_argument("--open-pr", action="store_true", help="push the branch and open a PR/MR on the configured forge")
     s.add_argument("--json", action="store_true")
