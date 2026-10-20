@@ -15,45 +15,31 @@ spec:
       template:
         metadata:
           labels: {{- include "ambientq.selector" . | nindent 12 }}
+            app.kubernetes.io/component: evaluate
         spec:
           restartPolicy: Never
           automountServiceAccountToken: false
-          securityContext: {fsGroup: 10001}
-          {{- if .Values.persistence.enabled }}
+          securityContext: {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          {{- include "ambientq.scheduling" . | nindent 10 }}
+          {{- if include "ambientq.sqlitePVC" . }}
           # Shares the SQLite volume with the server pod (RWO): schedule on the same node, or use Postgres.
           affinity:
             podAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
                 - labelSelector:
                     matchLabels: {{- include "ambientq.selector" . | nindent 22 }}
+                      app.kubernetes.io/component: server
                   topologyKey: kubernetes.io/hostname
           {{- end }}
           initContainers: {{- include "ambientq.gitInit" . | nindent 12 }}
           containers:
             - name: evaluate
-              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              image: {{ include "ambientq.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
               args: ["evaluate", "--trigger", "schedule"]
               env: {{- include "ambientq.env" . | nindent 16 }}
               resources: {{- toYaml .Values.resources | nindent 16 }}
-              securityContext: {{- include "ambientq.securityContext" . | nindent 16 }}
-              volumeMounts:
-                - {name: config, mountPath: /etc/ambientq/ambientq.yaml, subPath: ambientq.yaml}
-                - {name: data, mountPath: /data}
-                - {name: harness, mountPath: /harness}
-                - {name: tmp, mountPath: /tmp}
-                {{- if .Values.nai.caConfigMap }}
-                - {name: ca, mountPath: /etc/ambientq/ca}
-                {{- end }}
-          volumes:
-            - {name: config, configMap: {name: {{ include "ambientq.name" . }}}}
-            {{- if .Values.persistence.enabled }}
-            - {name: data, persistentVolumeClaim: {claimName: {{ include "ambientq.name" . }}-data}}
-            {{- else }}
-            - {name: data, emptyDir: {}}
-            {{- end }}
-            - {name: harness, emptyDir: {}}
-            - {name: tmp, emptyDir: {}}
-            {{- if .Values.nai.caConfigMap }}
-            - {name: ca, configMap: {name: {{ .Values.nai.caConfigMap }}}}
-            {{- end }}
+              securityContext: {{- toYaml .Values.securityContext | nindent 16 }}
+              volumeMounts: {{- include "ambientq.volumeMounts" . | nindent 16 }}
+          volumes: {{- include "ambientq.volumes" . | nindent 12 }}
 {{- end }}

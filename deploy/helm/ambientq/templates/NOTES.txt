@@ -1,9 +1,23 @@
-ambientq is running beside your agents.
+ambientq {{ .Chart.AppVersion }} is running beside your agents.
+{{- $svc := printf "http://%s.%s.svc:%v" (include "ambientq.name" .) .Release.Namespace .Values.service.port }}
+{{- $public := include "ambientq.publicUrl" . }}
 
-  Dashboard:  kubectl port-forward svc/{{ include "ambientq.name" . }} 8080:{{ .Values.service.port }}  ->  http://localhost:8080
-  OTLP/HTTP:  http://{{ include "ambientq.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/v1/traces
+  Dashboard:  {{ if $public }}{{ $public }}/{{ else }}kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "ambientq.name" . }} 8080:{{ .Values.service.port }}  ->  http://localhost:8080/{{ end }}
+  Sign-in:    {{ if eq .Values.auth.mode "none" }}none (read-only dashboard; set auth.mode to oidc or proxy for approvals){{ else }}{{ .Values.auth.mode }}{{ end }}
+{{- if eq .Values.auth.mode "oidc" }}
+              register the redirect URI {{ $public }}/auth/callback with your identity provider
+{{- end }}
+  OTLP/HTTP:  {{ $svc }}/v1/traces
               (set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT on your agents; protocol http/json)
+  Gateway:    {{ $svc }}/v1/gateway/logs  (POST proxy / AI-gateway logs)
+  Health:     {{ $svc }}/healthz
+  Store:      {{ if .Values.persistence.postgresUrlSecret }}PostgreSQL (Secret {{ .Values.persistence.postgresUrlSecret }}){{ else if .Values.persistence.enabled }}SQLite on PVC {{ include "ambientq.name" . }}-data{{ else }}SQLite on an emptyDir (lost on restart){{ end }}
 
 Judge model: {{ .Values.nai.model }} at {{ .Values.nai.baseUrl }}
-Nothing leaves the cluster except calls to that endpoint{{ if .Values.harness.repo }} and your git server{{ end }}.
+{{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.egressCIDRs) }}
+
+WARNING: networkPolicy.egressCIDRs is empty, so the pods can reach only DNS. Add the
+NAI endpoint{{ if .Values.harness.repo }}, your git server{{ end }}{{ if eq .Values.auth.mode "oidc" }}, the OIDC issuer{{ end }}{{ if .Values.alerts.webhooks }}, the webhook targets{{ end }}{{ if .Values.persistence.postgresUrlSecret }}, PostgreSQL{{ end }}.
+{{- end }}
+Nothing leaves the cluster except calls to the endpoints you allow.
 Patches are only ever proposed (branch/PR); a human approves and merges.

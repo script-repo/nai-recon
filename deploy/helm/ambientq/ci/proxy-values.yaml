@@ -1,0 +1,13 @@
+# CI: sign-in through oauth2-proxy in front of the Ingress (auth.mode: proxy).
+auth:
+  mode: proxy
+  sessionSecret: {secretName: ambientq-auth}
+  proxy: {trustedProxies: [10.42.0.0/16]}
+  roles: {approver: [{group: sre}], viewer: ["*"]}
+ingress:
+  enabled: true
+  host: ambientq.example.invalid
+  annotations:
+    nginx.ingress.kubernetes.io/auth-url: https://oauth2.example.invalid/oauth2/auth
+    nginx.ingress.kubernetes.io/auth-signin: https://oauth2.example.invalid/oauth2/start?rd=$scheme://$host$request_uri
+    nginx.ingress.kubernetes.io/auth-response-headers: X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups
