@@ -49,10 +49,11 @@ def _print(data: Any, as_json: bool) -> None:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
+    from ambientq.ingest.gateway import mappings_from_config
     from ambientq.ingest.jsonl import parse_files
 
     cfg, store = _ctx(args)
-    parsed = parse_files(args.paths)
+    parsed = parse_files(args.paths, fmt=args.format, mappings=mappings_from_config(cfg.section("gateway")))
     touched = store.ingest_spans(parsed.spans) if parsed.spans else set()
     for conv in parsed.conversations:
         store.upsert_conversation(conv)
@@ -180,7 +181,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
     host = args.host or cfg.get("server", "host")
     port = args.port or int(cfg.get("server", "port"))
     token = cfg.secret("server", "ingest_token_env")
-    srv = make_server(App(store, token), host, port)
+    from ambientq.ingest.gateway import mappings_from_config
+
+    srv = make_server(App(store, token, gateway_mappings=mappings_from_config(cfg.section("gateway"))), host, port)
     print(f"ambientq {__version__}: dashboard http://{host}:{port}/  OTLP/HTTP http://{host}:{port}/v1/traces"
           f"{'  (ingest token required)' if token else ''}")
     with contextlib.suppress(KeyboardInterrupt):
@@ -224,6 +227,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("ingest", help="ingest JSONL / OTLP JSON trace files or directories")
     s.add_argument("paths", nargs="+")
+    s.add_argument("--format", default="auto",
+                   choices=["auto", "otlp", "record", "langchain", "proxy-log", "litellm", "envoy-ai-gateway",
+                            "kong", "nai-gateway"],
+                   help="input format (default: detect per record); proxy-log formats read gateway.mappings")
     s.set_defaults(fn=cmd_ingest)
 
     s = sub.add_parser("evaluate", help="grade sampled conversations and update insights")
