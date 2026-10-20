@@ -85,6 +85,8 @@ COLUMNS = [
     ("proposals", "kind", "TEXT"),
     ("proposals", "shadow", "TEXT"),
     ("proposals", "decision_note", "TEXT"),
+    ("proposals", "original", "TEXT"),
+    ("proposals", "replacement", "TEXT"),
 ]
 
 
@@ -276,9 +278,12 @@ class SQLStore:
 
     def list_conversations(self, *, agent: str | None = None, since_ns: int = 0,
                            not_evaluated_for: str | None = None, limit: int = 100_000,
-                           team: str | None = None) -> list[Conversation]:
+                           team: str | None = None, ingested_after: float | None = None) -> list[Conversation]:
         sql = "SELECT * FROM conversations WHERE started_ns >= ?"
         params: list[Any] = [since_ns]
+        if ingested_after is not None:
+            sql += " AND updated_at > ?"
+            params.append(ingested_after)
         if agent:
             sql += " AND agent_name = ?"
             params.append(agent)

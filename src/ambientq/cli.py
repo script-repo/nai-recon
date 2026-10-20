@@ -87,6 +87,13 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
               f"{r.input_tokens + r.output_tokens} tokens")
         c = out.correlation
         print(f"insights: {len(c.new)} new, {len(c.recurring)} recurring, {len(c.resolved)} resolved")
+    if llm is not None and cfg.get("shadow", "enabled", False):
+        from ambientq.shadow import shadow_pending
+
+        for pid, res in shadow_pending(store, cfg, harness, llm.with_model(cfg.get("replay", "model")),
+                                       llm).items():
+            if not args.json:
+                print(f"shadow {pid}: {res.get('verdict')} ({res.get('conversations', 0)} conversation(s))")
     return 0
 
 
@@ -165,6 +172,27 @@ def cmd_propose(args: argparse.Namespace) -> int:
     print(f"\n{p['diff']}")
     print("Nothing was applied. Approve or reject with: ambientq approve "
           f"{p['proposal_id']} --by <name> [--reject]")
+    return 0
+
+
+def cmd_shadow(args: argparse.Namespace) -> int:
+    from ambientq.harness import Harness
+    from ambientq.shadow import shadow_test
+
+    cfg, store = _ctx(args)
+    harness = Harness.load(args.harness or cfg.get("harness", "path"))
+    llm = _llm(cfg, store)
+    since = _since(args.since) / 1e9 if args.since else None
+    res = shadow_test(store, cfg, args.proposal, harness, llm.with_model(cfg.get("replay", "model")), llm,
+                      limit=args.limit, since=since)
+    if args.json:
+        _print(res, True)
+        return 0
+    print(f"shadow test of {args.proposal}: {res['conversations']} new conversation(s), "
+          f"findings live {res['live_findings']} vs patched {res['patched_findings']}, "
+          f"wins {res['wins']}, losses {res['losses']} -> {res['verdict']}")
+    for e in res["errors"][:10]:
+        print(f"  warning: {e}", file=sys.stderr)
     return 0
 
 
@@ -267,6 +295,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--kind", choices=["prompt", "tool_description", "tool_schema", "guardrail", "config"], help="force what to fix (default: chosen from the insight)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_propose)
+
+    s = sub.add_parser("shadow", help="run a proposal's patched harness beside the live one on new traffic")
+    s.add_argument("proposal")
+    s.add_argument("--harness")
+    s.add_argument("--since", help="conversations ingested in the last e.g. 24h (default: since the proposal)")
+    s.add_argument("--limit", type=int, help="at most N conversations (default shadow.limit)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_shadow)
 
     s = sub.add_parser("approve", help="record a human decision on a proposal")
     s.add_argument("proposal")

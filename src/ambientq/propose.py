@@ -100,7 +100,7 @@ def propose(store: SQLStore, cfg: Config, insight_id: str, harness: Harness, llm
         "diff": patch.diff, "rationale": patch.rationale, "replay": None, "branch": None, "pr_url": None,
         "approved_by": None, "approved_at": None, "created_at": now_s(),
         "kind": patch.kind, "team": ins.team or store.default_team(ins.agent_name), "agent_name": ins.agent_name,
-        "shadow": None, "decision_note": None,
+        "shadow": None, "decision_note": None, "original": patch.original, "replacement": patch.replacement,
     }
     patched = harness.with_replacement(patch.location, patch.replacement)
     run_replay = cfg.get("replay", "enabled", True) if do_replay is None else do_replay
