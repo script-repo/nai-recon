@@ -1,4 +1,5 @@
-"""Command line: ingest, evaluate, insights, investigate, propose, approve, serve, demo, mock-llm."""
+"""Command line: ingest, evaluate, insights, investigate, propose, approve, usage, report, audit-export,
+serve, demo, mock-llm."""
 
 from __future__ import annotations
 
@@ -24,6 +25,21 @@ def _since(value: str | None) -> int:
         raise SystemExit(f"--since must look like 36h / 7d / 90m, got {value!r}")
     secs = int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
     return int((time.time() - secs) * 1e9)
+
+
+def _when(value: str | None) -> float | None:
+    """``7d`` / ``36h`` (that long ago) or an ISO date/time (UTC unless it has an offset) -> epoch seconds."""
+    if not value:
+        return None
+    if re.fullmatch(r"\d+[smhd]", value):
+        return _since(value) / 1e9
+    from datetime import UTC, datetime
+
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise SystemExit(f"expected a duration like 7d or an ISO date/time, got {value!r}") from None
+    return (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).timestamp()
 
 
 def _ctx(args: argparse.Namespace) -> tuple[Config, Any]:
@@ -173,6 +189,61 @@ def cmd_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_usage(args: argparse.Namespace) -> int:
+    from ambientq.cost import Pricing, format_cost, summarize
+
+    cfg, store = _ctx(args)
+    pricing = Pricing.from_config(cfg)
+    rows = store.usage_rows(since=_when(args.since) or 0.0, team=args.team)
+    data = summarize(rows, pricing, args.by)
+    data["since"] = args.since
+    if args.json:
+        _print(data, True)
+        return 0
+    print(f"{'' if not args.team else f'team {args.team}, '}last {args.since}, by {args.by} ({pricing.currency})")
+    print(f"{args.by:<32} {'calls':>8} {'input':>12} {'output':>12} {'cost':>16}")
+    for r in [*data["rows"], {"key": "TOTAL", **data["totals"]}]:
+        print(f"{(r['key'] or '-')[:32]:<32} {r['calls']:>8,} {r['input_tokens']:>12,} {r['output_tokens']:>12,} "
+              f"{format_cost(r['cost'], pricing.currency):>16}")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from ambientq.report import build_report, render_html, report_basename
+
+    cfg, store = _ctx(args)
+    month = args.month or time.strftime("%Y-%m", time.gmtime())
+    report = build_report(store, cfg, month, team=args.team)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    base = out / report_basename(month, args.team)
+    if args.format in ("json", "both"):
+        base.with_suffix(".json").write_text(json.dumps(report, indent=2, default=str) + "\n")
+        print(base.with_suffix(".json"))
+    if args.format in ("html", "both"):
+        base.with_suffix(".html").write_text(render_html(report), encoding="utf-8")
+        print(base.with_suffix(".html"))
+    return 0
+
+
+def cmd_audit_export(args: argparse.Namespace) -> int:
+    from ambientq.siem import iter_export
+
+    cfg, store = _ctx(args)
+    rows = store.audit_log(limit=2**62, since=_when(args.since) or 0.0, until=_when(args.until), ascending=True)
+    lines = iter_export(rows, args.format)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            n = sum(fh.write(line + "\n") > 0 for line in lines)
+        print(f"wrote {n} audit events to {args.out}", file=sys.stderr)
+    else:
+        for line in lines:
+            sys.stdout.write(line + "\n")
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from ambientq.web import App, make_server
 
@@ -266,6 +337,27 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--reject", action="store_true")
     s.add_argument("--note")
     s.set_defaults(fn=cmd_approve)
+
+    s = sub.add_parser("usage", help="token usage and cost from agent traffic and ambientq's own calls")
+    s.add_argument("--since", default="30d", help="e.g. 30d, 24h, or an ISO date (default 30d)")
+    s.add_argument("--by", choices=["agent", "model", "team", "source"], default="model")
+    s.add_argument("--team")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_usage)
+
+    s = sub.add_parser("report", help="monthly compliance report (HTML with print CSS, and JSON)")
+    s.add_argument("--month", help="YYYY-MM in UTC (default: the current month)")
+    s.add_argument("--team")
+    s.add_argument("--format", choices=["html", "json", "both"], default="both")
+    s.add_argument("--out", default=".", help="output directory (default .)")
+    s.set_defaults(fn=cmd_report)
+
+    s = sub.add_parser("audit-export", help="audit events for a SIEM: JSON lines, ArcSight CEF or RFC 5424 syslog")
+    s.add_argument("--since", default="7d", help="e.g. 7d, 24h, or an ISO date/time (default 7d)")
+    s.add_argument("--until", help="end (exclusive): a duration ago or an ISO date/time")
+    s.add_argument("--format", choices=["jsonl", "cef", "syslog"], required=True)
+    s.add_argument("--out", help="write to FILE instead of stdout")
+    s.set_defaults(fn=cmd_audit_export)
 
     s = sub.add_parser("serve", help="OTLP/HTTP receiver + read-only dashboard")
     s.add_argument("--host")
