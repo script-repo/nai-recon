@@ -55,9 +55,11 @@ def page(title: str, body: str) -> str:
 
 
 class App:
-    def __init__(self, store: SQLStore, ingest_token: str | None = None) -> None:
+    def __init__(self, store: SQLStore, ingest_token: str | None = None,
+                 gateway_mappings: dict[str, Any] | None = None) -> None:
         self.store = store
         self.ingest_token = ingest_token
+        self.gateway_mappings = gateway_mappings
 
     # -- pages ------------------------------------------------------------------
     def insights_page(self, status: str | None) -> str:
@@ -181,6 +183,16 @@ class App:
         touched = self.store.ingest_spans(spans)
         return 200, {"partialSuccess": {}, "spans": len(spans), "conversations": len(touched)}
 
+    def ingest_gateway(self, body: bytes, content_type: str, auth: str | None) -> tuple[int, dict[str, Any]]:
+        """``POST /v1/gateway/logs``: proxy-log records (JSON array, object or JSON lines)."""
+        if self.ingest_token and not hmac.compare_digest(auth or "", f"Bearer {self.ingest_token}"):
+            return 401, {"error": "unauthorized"}
+        from ambientq.ingest.gateway import ingest_gateway_payload
+        try:
+            return 200, ingest_gateway_payload(self.store, body, content_type, self.gateway_mappings)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+
 
 def make_server(app: App, host: str, port: int) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
@@ -235,7 +247,8 @@ def make_server(app: App, host: str, port: int) -> ThreadingHTTPServer:
                 return self._send(500, page("Error", f"<pre>{_e(exc)}</pre>"))
 
         def do_POST(self) -> None:  # noqa: N802
-            if urlparse(self.path).path.rstrip("/") != "/v1/traces":
+            route = urlparse(self.path).path.rstrip("/")
+            if route not in ("/v1/traces", "/v1/gateway/logs"):
                 return self._json(404, {"error": "not found"})
             n = int(self.headers.get("Content-Length", 0))
             if n > MAX_BODY:
@@ -244,8 +257,9 @@ def make_server(app: App, host: str, port: int) -> ThreadingHTTPServer:
             if self.headers.get("Content-Encoding", "") == "gzip":
                 import gzip
                 body = gzip.decompress(body)
-            code, data = app.ingest(body, self.headers.get("Content-Type", "application/json"),
-                                    self.headers.get("Authorization"))
+            handler = app.ingest_gateway if route == "/v1/gateway/logs" else app.ingest
+            code, data = handler(body, self.headers.get("Content-Type", "application/json"),
+                                 self.headers.get("Authorization"))
             return self._json(code, data)
 
     return ThreadingHTTPServer((host, port), Handler)

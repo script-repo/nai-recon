@@ -44,7 +44,10 @@ def build_conversation(conversation_id: str, spans: list[Span]) -> Conversation:
             seen.add(k)
             if cid:
                 results_seen.add(cid)
-            add("tool", m.get("content", ""), span, tool_call_id=cid or None, tool_name=m.get("name"))
+            add("tool", m.get("content", ""), span, tool_call_id=cid or None, tool_name=m.get("name"),
+                is_error=bool(m.get("is_error")))
+            if m.get("is_error"):
+                conv.has_error = True
             return
         content = m.get("content", "")
         tcs = m.get("tool_calls") or []

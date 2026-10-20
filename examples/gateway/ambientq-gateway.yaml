@@ -1,0 +1,14 @@
+# Gateway ingest settings (merge into ambientq.yaml). See docs/GATEWAY.md.
+gateway:
+  # Tried first, before the preset's own session paths. Dotted paths into one log record;
+  # dict keys match case-insensitively, so request headers can be named as sent.
+  session_fields:
+    - metadata.requester_custom_headers.x-session-id   # LiteLLM: header the agent sends
+    - request_headers.x-session-id                      # generic gateways
+  # Per logical field, one path or a list. A key written "=field" replaces the preset's paths
+  # instead of being tried before them. Fields: request, response, messages, model,
+  # response_model, session, agent, team, start_time, end_time, duration_ms, usage_in,
+  # usage_out, status, error, request_id.
+  mappings:
+    agent: [metadata.requester_custom_headers.x-agent-name, metadata.user_api_key_alias]
+    team: metadata.user_api_key_team_alias
