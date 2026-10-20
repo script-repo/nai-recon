@@ -64,6 +64,7 @@ def evaluate(store: SQLStore, cfg: Config, harness: Harness, llm: LLMClient | No
     verifier_on = cfg.get("verifier", "enabled", True) if use_verifier is None else use_verifier
     judged: set[str] = set()
     if llm is not None:
+        llm.usage_context.update(agent=harness.agent, run_id=run.run_id)
         llm.budget = Budget(max_tokens=budget_tokens)
         vllm = llm.with_model(cfg.get("llm", "verifier_model")) if cfg.get("verifier", "llm", True) else None
         for i, conv in enumerate(sample):
