@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ambientq"
+version = "0.1.0"
+description = "On-prem ambient quality agent: grade agent traces with an LLM on Nutanix Enterprise AI (or any OpenAI-compatible endpoint), dedupe failures into insights, and propose harness fixes for human approval."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ambientq contributors" }]
+keywords = ["llm", "agents", "evaluation", "opentelemetry", "nutanix", "observability"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+otlp-proto = ["opentelemetry-proto>=1.20", "protobuf>=4.21"]
+dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.10", "types-PyYAML"]
+
+[project.scripts]
+ambientq = "ambientq.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ambientq = ["demo/harness/**/*", "demo/harness/*", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["ambientq"]
+mypy_path = "src"
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true
