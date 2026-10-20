@@ -277,3 +277,88 @@ def write_jsonl(path: str, records: list[dict[str, Any]]) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         for r in records:
             fh.write(json.dumps(r) + "\n")
+
+
+# --- gateway (proxy) logs ---------------------------------------------------------
+
+def _openai_msg(m: dict[str, Any]) -> dict[str, Any]:
+    """A rendering-step message in OpenAI chat format, as a client sends it through a proxy."""
+    if m["role"] == "tool":
+        return {"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["content"]}
+    out: dict[str, Any] = {"role": m["role"], "content": m.get("content") or None}
+    if m.get("tool_calls"):
+        out["tool_calls"] = [{"id": tc["id"], "type": "function",
+                              "function": {"name": tc["name"], "arguments": json.dumps(tc["args"])}}
+                             for tc in m["tool_calls"]]
+    return out
+
+
+def to_proxy_log(conv_id: str, events: list[Event], t0_ns: int, rng: random.Random, *,
+                 style: str = "litellm", agent: str = AGENT, team: str | None = None) -> list[dict[str, Any]]:
+    """One LiteLLM-style log entry per LLM call; the history is re-sent on every call.
+
+    ``style="litellm"`` mimics LiteLLM's StandardLoggingPayload (session id in
+    ``metadata`` and the ``x-session-id`` / ``x-agent-name`` request headers);
+    ``style="generic"`` writes ``{request, response, request_headers}`` entries.
+    """
+    if style not in ("litellm", "generic"):
+        raise ValueError(f"unknown proxy log style {style!r}")
+    entries: list[dict[str, Any]] = []
+    t = t0_ns
+    for st in _steps(events):
+        dur = rng.randint(200, 2500) * 1_000_000
+        if st["type"] == "tool":  # runs in the agent, invisible to the gateway
+            t += dur + 5_000_000
+            continue
+        msgs = [_openai_msg(m) for m in st["input"]]
+        out = _openai_msg(st["output"])
+        tin, tout = 40 * len(st["input"]) + 300, 40
+        rid = f"chatcmpl-{rng.getrandbits(64):016x}"
+        response = {"id": rid, "object": "chat.completion", "created": t // 1_000_000_000, "model": MODEL,
+                    "choices": [{"index": 0, "message": out,
+                                 "finish_reason": "tool_calls" if out.get("tool_calls") else "stop"}],
+                    "usage": {"prompt_tokens": tin, "completion_tokens": tout, "total_tokens": tin + tout}}
+        headers = {"x-session-id": conv_id, "x-agent-name": agent, **({"x-team": team} if team else {})}
+        if style == "litellm":
+            entries.append({
+                "id": rid, "trace_id": f"{rng.getrandbits(128):032x}", "call_type": "acompletion",
+                "model": MODEL, "model_group": MODEL, "custom_llm_provider": "openai",
+                "api_base": "https://nai.example.local/api/v1", "status": "success",
+                "startTime": t / 1e9, "endTime": (t + dur) / 1e9,
+                "prompt_tokens": tin, "completion_tokens": tout, "total_tokens": tin + tout,
+                "messages": msgs, "response": response,
+                "metadata": {"user_api_key_alias": f"{agent}-key", "session_id": conv_id,
+                             "user_api_key_team_alias": team, "requester_custom_headers": headers},
+            })
+        else:
+            entries.append({"request_id": rid, "start_time": t / 1e9, "end_time": (t + dur) / 1e9,
+                            "status": 200, "request_headers": headers,
+                            "request": {"model": MODEL, "messages": msgs}, "response": response})
+        t += dur + 5_000_000
+    return entries
+
+
+def generate_proxy_logs(day: int, n: int = 30, seed: int = 7, *, style: str = "litellm",
+                        exclude: tuple[str, ...] = (), t0_ns: int | None = None
+                        ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """The conversations of ``generate(day, n, seed)`` as gateway logs (same ids and scenarios).
+
+    Returns (log entries in time order, {conversation_id: scenario}).
+    """
+    rng = random.Random(seed * 1000 + day)
+    names = [k for k in SCENARIOS if k not in exclude]
+    weights = [SCENARIOS[k][1] for k in names]
+    base = t0_ns if t0_ns is not None else (1_760_000_000 + day * 86_400) * 1_000_000_000
+    entries: list[dict[str, Any]] = []
+    truth: dict[str, str] = {}
+    for i in range(n):
+        sc = rng.choices(names, weights)[0]
+        cid = f"d{day}-c{i:03d}"
+        events = SCENARIOS[sc][0](rng)
+        t = base + i * 60_000_000_000
+        if i % 7 != 6:  # keep the random stream aligned with generate(), which renders OTLP here
+            to_otlp(cid, events, t, rng, style="openinference" if i % 5 == 4 else "semconv")
+        entries.extend(to_proxy_log(cid, events, t, random.Random(f"{seed}-{day}-{cid}"), style=style))
+        truth[cid] = sc
+    entries.sort(key=lambda e: e.get("startTime", e.get("start_time", 0)))
+    return entries, truth
