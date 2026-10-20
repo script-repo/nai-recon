@@ -29,18 +29,20 @@ class EvalResult:
 
 def evaluate(store: SQLStore, cfg: Config, harness: Harness, llm: LLMClient | None, *, since_ns: int = 0,
              rate: float | None = None, max_tokens: int | None = None, use_verifier: bool | None = None,
-             trigger: str = "manual", reevaluate: bool = False) -> EvalResult:
+             trigger: str = "manual", reevaluate: bool = False, team: str | None = None,
+             include_unnamed: bool = True) -> EvalResult:
     version = harness.version()
+    team = team or cfg.team_for(harness.agent)
     budget_tokens = int(max_tokens if max_tokens is not None else cfg.get("budget", "max_tokens_per_run", 0))
     run = Run(run_id=new_id("run"), started_at=now_s(), run_trigger=trigger, harness_version=version,
-              budget_tokens=budget_tokens)
+              budget_tokens=budget_tokens, team=team, agent_name=harness.agent)
     store.save_run(run)
     store.audit("ambientq", "run_started", run.run_id, {"harness_version": version, "trigger": trigger})
 
     rubric = build_rubric(harness, cfg.get("judge", "goal"))
     candidates = [c for c in store.list_conversations(since_ns=since_ns,
                                                       not_evaluated_for=None if reevaluate else version)
-                  if c.agent_name in ("", harness.agent)]
+                  if c.agent_name == harness.agent or (include_unnamed and c.agent_name == "")]
     run.candidates = len(candidates)
 
     checks = load_checks(cfg.get("checks", "plugins", []), cfg.get("checks", "disabled", []))
@@ -64,7 +66,7 @@ def evaluate(store: SQLStore, cfg: Config, harness: Harness, llm: LLMClient | No
     verifier_on = cfg.get("verifier", "enabled", True) if use_verifier is None else use_verifier
     judged: set[str] = set()
     if llm is not None:
-        llm.usage_context.update(agent=harness.agent, run_id=run.run_id)
+        llm.usage_context.update(agent=harness.agent, run_id=run.run_id, team=team)
         llm.budget = Budget(max_tokens=budget_tokens)
         vllm = llm.with_model(cfg.get("llm", "verifier_model")) if cfg.get("verifier", "llm", True) else None
         for i, conv in enumerate(sample):
@@ -97,7 +99,8 @@ def evaluate(store: SQLStore, cfg: Config, harness: Harness, llm: LLMClient | No
     titles = {i.rid: i.text for i in rubric.items}
     corr = correlate(store, run.run_id, all_findings, agents_evaluated={harness.agent} if candidates else set(),
                      harness_version=version, similarity=float(cfg.get("insights", "similarity", 0.5)),
-                     resolve_after_runs=int(cfg.get("insights", "resolve_after_runs", 2)), titles=titles)
+                     resolve_after_runs=int(cfg.get("insights", "resolve_after_runs", 2)), titles=titles,
+                     team=team)
 
     # Budget-skipped conversations stay eligible for the next run.
     done = [c.conversation_id for c in candidates if c.conversation_id not in sampled_ids or c.conversation_id in judged]
@@ -105,6 +108,11 @@ def evaluate(store: SQLStore, cfg: Config, harness: Harness, llm: LLMClient | No
         done = [c.conversation_id for c in candidates]
     store.mark_evaluated(done, run.run_id, version)
     store.mark_judged(judged, run.run_id)
+
+    if corr.new or corr.regressions:
+        from ambientq.alerts import deliver
+
+        deliver(store, cfg, corr, run.run_id)
 
     run.finished_at = now_s()
     run.status = "budget_exhausted" if run.skipped_budget else "ok"

@@ -15,6 +15,8 @@ from typing import Any
 
 from ambientq import __version__
 from ambientq.config import Config
+from ambientq.models import ProposalStatus
+from ambientq.store import SQLStore
 
 
 def _since(value: str | None) -> int:
@@ -80,37 +82,62 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 1 if parsed.errors and not (parsed.spans or parsed.conversations) else 0
 
 
+def _harness_path(cfg: Config, args: argparse.Namespace, agent: str | None = None) -> str:
+    """The harness to use: --harness, else the ``agents`` entry for ``agent``, else ``harness.path``."""
+    if getattr(args, "harness", None):
+        return str(args.harness)
+    for a in cfg.agents():
+        if agent and a["name"] == agent:
+            return str(a["harness"])
+    return str(cfg.get("harness", "path"))
+
+
+def _insight_agent(store: SQLStore, insight_id: str) -> str | None:
+    ins = store.get_insight(insight_id)
+    return ins.agent_name if ins else None
+
+
 def cmd_evaluate(args: argparse.Namespace) -> int:
     from ambientq.evaluate import evaluate
     from ambientq.harness import Harness
 
     cfg, store = _ctx(args)
-    harness = Harness.load(args.harness or cfg.get("harness", "path"))
+    agents = cfg.agents() if not args.harness else [{"name": None, "harness": args.harness, "team": None}]
+    if args.agent:
+        agents = [a for a in agents if a["name"] == args.agent]
+        if not agents:
+            print(f"no agent {args.agent!r} in the config's agents list", file=sys.stderr)
+            return 2
     llm = None if args.checks_only else _llm(cfg, store)
-    out = evaluate(store, cfg, harness, llm, since_ns=_since(args.since), rate=args.rate,
-                   max_tokens=args.max_tokens, use_verifier=not args.no_verify, trigger=args.trigger,
-                   reevaluate=args.all)
-    r = out.run
-    summary = {"run_id": r.run_id, "harness_version": r.harness_version, "candidates": r.candidates,
-               "sampled": r.sampled, "judged": r.evaluated, "skipped_budget": r.skipped_budget,
-               "findings_kept": r.findings, "findings_rejected": r.rejected,
-               "tokens": r.input_tokens + r.output_tokens, "budget": r.budget_tokens,
-               "insights": asdict(out.correlation), "status": r.status}
-    if args.json:
-        _print(summary, True)
-    else:
-        print(f"run {r.run_id} on harness {r.harness_version}: {r.candidates} candidates, {r.sampled} sampled, "
-              f"{r.evaluated} judged, {r.findings} findings kept, {r.rejected} rejected, "
-              f"{r.input_tokens + r.output_tokens} tokens")
-        c = out.correlation
-        print(f"insights: {len(c.new)} new, {len(c.recurring)} recurring, {len(c.resolved)} resolved")
-    if llm is not None and cfg.get("shadow", "enabled", False):
-        from ambientq.shadow import shadow_pending
+    summaries = []
+    for n, a in enumerate(agents):
+        harness = Harness.load(a["harness"])
+        out = evaluate(store, cfg, harness, llm, since_ns=_since(args.since), rate=args.rate,
+                       max_tokens=args.max_tokens, use_verifier=not args.no_verify, trigger=args.trigger,
+                       reevaluate=args.all, team=a["team"], include_unnamed=n == 0)
+        r = out.run
+        summaries.append({"run_id": r.run_id, "agent": r.agent_name, "team": r.team,
+                          "harness_version": r.harness_version, "candidates": r.candidates,
+                          "sampled": r.sampled, "judged": r.evaluated, "skipped_budget": r.skipped_budget,
+                          "findings_kept": r.findings, "findings_rejected": r.rejected,
+                          "tokens": r.input_tokens + r.output_tokens, "budget": r.budget_tokens,
+                          "insights": asdict(out.correlation), "status": r.status})
+        if not args.json:
+            print(f"run {r.run_id} for {r.agent_name or 'agent'} (team {r.team}) on harness {r.harness_version}: "
+                  f"{r.candidates} candidates, {r.sampled} sampled, {r.evaluated} judged, {r.findings} findings "
+                  f"kept, {r.rejected} rejected, {r.input_tokens + r.output_tokens} tokens")
+            c = out.correlation
+            print(f"insights: {len(c.new)} new, {len(c.recurring)} recurring, {len(c.resolved)} resolved"
+                  f"{f', {len(c.regressions)} regression(s)' if c.regressions else ''}")
+        if llm is not None and cfg.get("shadow", "enabled", False):
+            from ambientq.shadow import shadow_pending
 
-        for pid, res in shadow_pending(store, cfg, harness, llm.with_model(cfg.get("replay", "model")),
-                                       llm).items():
-            if not args.json:
-                print(f"shadow {pid}: {res.get('verdict')} ({res.get('conversations', 0)} conversation(s))")
+            for pid, res in shadow_pending(store, cfg, harness, llm.with_model(cfg.get("replay", "model")),
+                                           llm).items():
+                if not args.json:
+                    print(f"shadow {pid}: {res.get('verdict')} ({res.get('conversations', 0)} conversation(s))")
+    if args.json:
+        _print(summaries[0] if len(summaries) == 1 else summaries, True)
     return 0
 
 
@@ -132,14 +159,33 @@ def cmd_insights(args: argparse.Namespace) -> int:
             for o in data["occurrences"]:
                 print(f"  run {o['run_id']}: {o['count']} -> {o['status_after']}")
         return 0
-    rows = store.insights(status=args.status)
+    rows = store.insights(status=args.status, team=args.team)
+    if args.agent:
+        rows = [i for i in rows if i.agent_name == args.agent]
     if args.json:
         _print([asdict(i) for i in rows], True)
         return 0
     if not rows:
         print("no insights")
     for i in rows:
-        print(f"{i.insight_id}  {str(i.status):9}  {i.severity:6}  x{i.occurrence_count:<3} {i.title}")
+        print(f"{i.insight_id}  {str(i.status):9}  {i.severity:6}  x{i.occurrence_count:<3} {i.title}"
+              f"{f'  [{i.team}]' if i.team and not args.team else ''}")
+    return 0
+
+
+def cmd_proposals(args: argparse.Namespace) -> int:
+    cfg, store = _ctx(args)
+    rows = store.proposals(team=args.team, status=args.status)
+    if args.json:
+        _print(rows, True)
+        return 0
+    if not rows:
+        print("no proposals")
+    for p in rows:
+        rep = p.get("replay") or {}
+        sh = (p.get("shadow") or {}).get("verdict", "-")
+        print(f"{p['proposal_id']}  {p['status']:16}  {p.get('kind') or 'prompt':16}  fixed {rep.get('fixed', '-')}"
+              f"  shadow {sh}  {p['file']}:{p['start_line']}  [{p.get('team') or '-'}]")
     return 0
 
 
@@ -148,7 +194,7 @@ def cmd_investigate(args: argparse.Namespace) -> int:
     from ambientq.investigate import investigate
 
     cfg, store = _ctx(args)
-    harness = Harness.load(args.harness or cfg.get("harness", "path"))
+    harness = Harness.load(_harness_path(cfg, args, _insight_agent(store, args.insight)))
     inv = investigate(store, args.insight, harness, None if args.locate_only else _llm(cfg, store),
                       cfg.get("judge", "goal"), kind=args.kind)
     if args.json:
@@ -168,7 +214,7 @@ def cmd_propose(args: argparse.Namespace) -> int:
     from ambientq.propose import propose
 
     cfg, store = _ctx(args)
-    harness = Harness.load(args.harness or cfg.get("harness", "path"))
+    harness = Harness.load(_harness_path(cfg, args, _insight_agent(store, args.insight)))
     if args.replay_mode:
         cfg.data["replay"]["mode"] = args.replay_mode
     p = propose(store, cfg, args.insight, harness, _llm(cfg, store), do_replay=not args.no_replay,
@@ -197,7 +243,8 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     from ambientq.shadow import shadow_test
 
     cfg, store = _ctx(args)
-    harness = Harness.load(args.harness or cfg.get("harness", "path"))
+    prop = store.get_proposal(args.proposal)
+    harness = Harness.load(_harness_path(cfg, args, prop.get("agent_name") if prop else None))
     llm = _llm(cfg, store)
     since = _since(args.since) / 1e9 if args.since else None
     res = shadow_test(store, cfg, args.proposal, harness, llm.with_model(cfg.get("replay", "model")), llm,
@@ -349,14 +396,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--checks-only", action="store_true", help="run only the deterministic checks (no LLM)")
     s.add_argument("--all", action="store_true", help="re-evaluate conversations already graded for this harness")
     s.add_argument("--trigger", default="manual", help="label for the run (manual, schedule, deploy)")
+    s.add_argument("--agent", help="grade only this agent from the config's agents list")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_evaluate)
 
     s = sub.add_parser("insights", help="list insights, or show one")
     s.add_argument("id", nargs="?")
     s.add_argument("--status", choices=["NEW", "RECURRING", "RESOLVED"])
+    s.add_argument("--team")
+    s.add_argument("--agent")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_insights)
+
+    s = sub.add_parser("proposals", help="list proposals")
+    s.add_argument("--status", choices=[str(x) for x in ProposalStatus])
+    s.add_argument("--team")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_proposals)
 
     s = sub.add_parser("investigate", help="locate the harness lines behind an insight and draft a patch")
     s.add_argument("insight")
