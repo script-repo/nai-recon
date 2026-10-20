@@ -4,7 +4,9 @@
   exporter writes),
 * simple conversation records ``{"conversation_id", "agent", "messages": [...]}``
   with OpenAI chat-format messages,
-* LangChain / LangSmith run records (``run_type`` llm/tool/chain).
+* LangChain / LangSmith run records (``run_type`` llm/tool/chain),
+* OpenAI-compatible proxy logs, one request/response pair per object
+  (LiteLLM, Envoy AI Gateway, Kong, generic gateways; see ``ingest.gateway``).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ambientq.ingest import gateway as gw
 from ambientq.ingest import normalize as nz
 from ambientq.ingest.otlp import decode_export_request
 from ambientq.models import Conversation, Span, Turn
@@ -160,30 +163,59 @@ def langchain_run_to_span(run: dict[str, Any]) -> Span:
     )
 
 
-def parse_records(records: Iterable[dict[str, Any]]) -> Parsed:
+FORMATS = ("auto", "otlp", "record", "langchain", *gw.FORMATS)
+
+
+def _is_otlp(rec: dict[str, Any]) -> bool:
+    return "resourceSpans" in rec or "resource_spans" in rec
+
+
+def _is_record(rec: dict[str, Any]) -> bool:
+    return "messages" in rec and ("conversation_id" in rec or "id" in rec)
+
+
+def parse_records(records: Iterable[dict[str, Any]], fmt: str = "auto",
+                  mappings: dict[str, Any] | None = None) -> Parsed:
+    """Parse records of one ``fmt`` (``auto`` detects each record's shape).
+
+    ``mappings`` are ``gateway.mappings`` for the proxy-log formats.
+    """
+    if fmt not in FORMATS:
+        raise ValueError(f"unknown format {fmt!r} (one of {', '.join(FORMATS)})")
     out = Parsed()
+    skipped = 0
     for i, rec in enumerate(records):
         try:
-            if "resourceSpans" in rec or "resource_spans" in rec:
+            if fmt in gw.FORMATS or (fmt == "auto" and gw.is_proxy_log(rec)):
+                spans, n, errs = gw.records_to_spans([rec], fmt if fmt in gw.FORMATS else "proxy-log", mappings)
+                out.spans.extend(spans)
+                skipped += n
+                out.errors.extend(f"record {i}: {e.split(': ', 1)[-1]}" for e in errs)
+            elif _is_otlp(rec) and fmt in ("auto", "otlp"):
                 out.spans.extend(decode_export_request(rec))
-            elif "messages" in rec and ("conversation_id" in rec or "id" in rec):
+            elif _is_record(rec) and fmt in ("auto", "record"):
                 out.conversations.append(record_to_conversation(rec))
-            elif "run_type" in rec:
+            elif "run_type" in rec and fmt in ("auto", "langchain"):
                 out.spans.append(langchain_run_to_span(rec))
             else:
-                out.errors.append(f"record {i}: unrecognized shape (keys: {sorted(rec)[:6]})")
+                want = "" if fmt == "auto" else f" for --format {fmt}"
+                out.errors.append(f"record {i}: unrecognized shape{want} (keys: {sorted(rec)[:6]})")
         except Exception as exc:  # keep going; report per record
             out.errors.append(f"record {i}: {exc}")
+    if skipped:
+        out.errors.append(f"{skipped} proxy-log record(s) carry no request/response messages "
+                          "(metadata-only access log?); skipped")
     return out
 
 
-def parse_files(paths: Iterable[str | Path]) -> Parsed:
+def parse_files(paths: Iterable[str | Path], fmt: str = "auto",
+                mappings: dict[str, Any] | None = None) -> Parsed:
     total = Parsed()
     for p in paths:
         path = Path(p)
         files = sorted(path.rglob("*.json*")) if path.is_dir() else [path]
         for f in files:
-            part = parse_records(iter_records(f))
+            part = parse_records(iter_records(f), fmt=fmt, mappings=mappings)
             total.spans.extend(part.spans)
             total.conversations.extend(part.conversations)
             total.errors.extend(f"{f}: {e}" for e in part.errors)

@@ -99,6 +99,8 @@ def message_from_any(m: dict[str, Any]) -> Message:
             msg["tool_call_id"] = m["tool_call_id"]
     if m.get("name"):
         msg["name"] = m["name"]
+    if m.get("is_error"):  # set by the gateway adapter on failed tool results
+        msg["is_error"] = True
     return msg
 
 
