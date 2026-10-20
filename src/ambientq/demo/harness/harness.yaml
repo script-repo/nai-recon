@@ -1,0 +1,7 @@
+# ambientq harness manifest for the demo agent.
+agent: nkp-ops-assistant
+system_prompt: prompts/system.md
+tools: tools/tools.yaml
+guardrails: guardrails.yaml
+config: agent.yaml
+goal: "Correct, grounded answers about NKP clusters and NAI endpoints; never leak credentials; never change infrastructure without confirmation."

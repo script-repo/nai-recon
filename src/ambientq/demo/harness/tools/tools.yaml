@@ -1,0 +1,38 @@
+- type: function
+  function:
+    name: get_cluster_status
+    description: Current health, NKP version and node count of one NKP cluster.
+    parameters:
+      type: object
+      properties:
+        cluster: {type: string, description: Cluster name, e.g. prod-east}
+      required: [cluster]
+- type: function
+  function:
+    name: list_nai_endpoints
+    description: List NAI inference endpoints with their model, status and URL.
+    parameters:
+      type: object
+      properties:
+        namespace: {type: string}
+      required: []
+- type: function
+  function:
+    name: scale_nodepool
+    description: Change the replica count of a node pool. Changes infrastructure.
+    parameters:
+      type: object
+      properties:
+        cluster: {type: string}
+        nodepool: {type: string}
+        replicas: {type: integer, minimum: 0}
+      required: [cluster, nodepool, replicas]
+- type: function
+  function:
+    name: search_docs
+    description: Search the Nutanix NKP and NAI documentation.
+    parameters:
+      type: object
+      properties:
+        query: {type: string}
+      required: [query]
