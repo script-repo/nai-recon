@@ -40,8 +40,9 @@ def _rule_id(rubric: list[dict[str, Any]], *needles: str) -> str | None:
     return None
 
 
-def _finding(rid: str | None, cat: str, sev: str, expected: str, actual: str, turn: int, quote: str) -> dict[str, Any]:
-    return {"rubric_id": rid or "", "category": cat, "severity": sev, "confidence": 0.9, "expected": expected,
+def _finding(rid: str | None, cat: str, sev: str, expected: str, actual: str, turn: int, quote: str,
+             confidence: float = 0.9) -> dict[str, Any]:
+    return {"rubric_id": rid or "", "category": cat, "severity": sev, "confidence": confidence, "expected": expected,
             "actual": actual, "evidence": [{"turn": turn, "quote": quote}]}
 
 
@@ -103,7 +104,7 @@ def judge(user: str) -> dict[str, Any]:
         last = conv[-1]
         out.append(_finding(r_docs, "grounding", "low", "Cite the document title",
                             "The answer relies on memory instead of the docs", last.get("index", 0),
-                            "according to my memory"))
+                            "according to my memory", confidence=0.6))
     if focus:
         out = [f for f in out if f["rubric_id"] == focus.group(1)]
     return {"findings": out}
