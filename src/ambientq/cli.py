@@ -1,5 +1,5 @@
 """Command line: ingest, evaluate, insights, investigate, propose, approve, usage, report, audit-export,
-serve, demo, mock-llm."""
+calibrate, export-labeling, serve, demo, mock-llm."""
 
 from __future__ import annotations
 
@@ -276,6 +276,87 @@ def cmd_audit_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from ambientq.calibrate import calibrate, read_labeled
+    from ambientq.harness import Harness
+
+    if args.sample:
+        from ambientq.demo.calibration import SAMPLE_PATH
+
+        path = Path(args.labeled or SAMPLE_PATH)
+        harness_path = args.harness or str(Path(SAMPLE_PATH).parents[1] / "harness")
+    elif args.labeled:
+        path, harness_path = Path(args.labeled), args.harness
+    else:
+        raise SystemExit("calibrate needs a labeled JSONL file, or --sample for the shipped demo set")
+    cfg, store = _ctx(args)
+    llm_cfg = cfg.data["llm"]
+    for key, val in (("base_url", args.base_url), ("model", args.model), ("api_key_env", args.api_key_env),
+                     ("verifier_model", args.verifier_model)):
+        if val:
+            llm_cfg[key] = val
+    parsed = read_labeled(path)
+    for e in parsed.errors[:50]:
+        print(f"  bad line: {e}", file=sys.stderr)
+    if parsed.errors:
+        print(f"error: {len(parsed.errors)} bad line(s) in {path}; fix them and run again", file=sys.stderr)
+        return 2
+    if parsed.unlabeled:
+        print(f"note: {len(parsed.unlabeled)} conversation(s) have no labels yet and are skipped", file=sys.stderr)
+    if not parsed.items:
+        print(f"error: no labeled conversations in {path}", file=sys.stderr)
+        return 2
+    harness = Harness.load(harness_path or cfg.get("harness", "path"))
+    llm = _llm(cfg, store)
+    llm.usage_context.update(agent=harness.agent, run_id=f"calibrate:{path.name}")
+    verify = not args.no_verify and bool(cfg.get("verifier", "enabled", True))
+    rep = calibrate(
+        parsed.items, harness, llm, verifier_llm=llm.with_model(cfg.get("llm", "verifier_model")),
+        verify=verify, llm_verify=bool(cfg.get("verifier", "llm", True)), with_checks=args.with_checks,
+        checks=_checks(cfg) if args.with_checks else None,
+        min_confidence=float(args.min_confidence if args.min_confidence is not None
+                             else cfg.get("judge", "min_confidence", 0.0)),
+        goal=cfg.get("judge", "goal"), max_findings=int(cfg.get("judge", "max_findings", 8)),
+        conversations_per_day=args.per_day,
+        sampling_rate=float(args.rate if args.rate is not None else cfg.get("sampling", "rate", 0.2)),
+    )
+    store.audit("ambientq", "calibrated", path.name, rep.summary())
+    data = rep.to_dict()
+    if args.out:
+        Path(args.out).write_text(json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8")
+    if args.json:
+        _print(data, True)
+    else:
+        print(rep.to_text())
+        if args.out:
+            print(f"\nfull report: {args.out}")
+    return 0 if rep.judged else 1
+
+
+def _checks(cfg: Config) -> Any:
+    from ambientq.checks import load_checks
+
+    return load_checks(cfg.get("checks", "plugins", []), cfg.get("checks", "disabled", []))
+
+
+def cmd_export_labeling(args: argparse.Namespace) -> int:
+    from ambientq.calibrate import export_for_labeling
+
+    cfg, store = _ctx(args)
+    recs = export_for_labeling(store, since_ns=_since(args.since), n=args.n, agent=args.agent, team=args.team,
+                               flagged_share=args.flagged_share, seed=args.seed)
+    with open(args.out, "w", encoding="utf-8") as fh:
+        for r in recs:
+            fh.write(json.dumps(r) + "\n")
+    store.audit("ambientq", "exported_for_labeling", args.out, {"conversations": len(recs), "since": args.since,
+                                                               "agent": args.agent, "team": args.team})
+    print(f"wrote {len(recs)} conversation(s) to {args.out}; fill in each line's \"labels\" and run: "
+          f"ambientq calibrate {args.out}")
+    return 0 if recs else 1
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from ambientq.web import App, make_server
 
@@ -402,6 +483,34 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--format", choices=["jsonl", "cef", "syslog"], required=True)
     s.add_argument("--out", help="write to FILE instead of stdout")
     s.set_defaults(fn=cmd_audit_export)
+
+    s = sub.add_parser("calibrate", help="measure the judge against human labels (precision, recall, kappa, cost)")
+    s.add_argument("labeled", nargs="?", help="labeled JSONL (see docs/CALIBRATION.md)")
+    s.add_argument("--sample", action="store_true", help="use the shipped demo labeled set and demo harness")
+    s.add_argument("--base-url", help="OpenAI-compatible endpoint, e.g. https://<nai-host>/api/v1, or 'mock'")
+    s.add_argument("--model", help="judge model (the NAI endpoint name)")
+    s.add_argument("--api-key-env", help="environment variable holding the endpoint API key")
+    s.add_argument("--verifier-model", help="verifier model (default: the judge model)")
+    s.add_argument("--no-verify", action="store_true", help="score raw judge findings (no evidence check, no verifier)")
+    s.add_argument("--with-checks", action="store_true", help="count deterministic check findings too")
+    s.add_argument("--min-confidence", type=float, help="threshold for the headline numbers (default judge.min_confidence)")
+    s.add_argument("--per-day", type=int, default=1000, help="conversations/day for the sizing estimate (default 1000)")
+    s.add_argument("--rate", type=float, help="sampling rate for the sizing estimate (default sampling.rate)")
+    s.add_argument("--harness")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--out", help="also write the full JSON report to FILE")
+    s.set_defaults(fn=cmd_calibrate)
+
+    s = sub.add_parser("export-labeling", help="write stored conversations as labeled-format records to label")
+    s.add_argument("--since", default="7d", help="conversations newer than e.g. 7d, 24h (default 7d)")
+    s.add_argument("--n", type=int, default=50, help="how many conversations (default 50)")
+    s.add_argument("--agent")
+    s.add_argument("--team")
+    s.add_argument("--flagged-share", type=float, default=0.5,
+                   help="share drawn from conversations ambientq already flagged (default 0.5)")
+    s.add_argument("--seed", default="ambientq", help="selection seed (same seed, same sample)")
+    s.add_argument("--out", required=True)
+    s.set_defaults(fn=cmd_export_labeling)
 
     s = sub.add_parser("serve", help="OTLP/HTTP receiver + read-only dashboard")
     s.add_argument("--host")
