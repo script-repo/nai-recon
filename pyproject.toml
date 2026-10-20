@@ -30,7 +30,7 @@ ambientq = "ambientq.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-ambientq = ["demo/harness/**/*", "demo/harness/*", "py.typed"]
+ambientq = ["demo/harness/**/*", "demo/harness/*", "demo/calibration/*.jsonl", "py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
