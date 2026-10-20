@@ -144,3 +144,23 @@ def test_replay_multi_vs_single_on_tool_using_fix(harness, llm):
     assert single.to_dict()["rows"][0]["steps"] == [1, 1]
     with pytest.raises(ValueError):
         Replayer("both").run(llm, harness, conv, 1)
+
+
+def test_library_answers_calls_this_conversation_never_recorded(store, cfg):
+    """A new tool call is answered from another conversation's recording with the same arguments, flagged."""
+    from ambientq.replay import build_library
+
+    with_status = conv_from(synthetic.sc_health_ok)
+    call = next(t for t in with_status.turns if t.tool_name == "get_cluster_status" and t.role == "assistant")
+    lib = build_library([with_status])
+    assert lib and all(not e.is_error for e in lib)
+    tape = ToolTape(library=lib).fresh()
+    ans = tape.answer("get_cluster_status", call.tool_args, "error")
+    assert ans.match == "library" and "health" in ans.content
+    assert tape.answer("get_cluster_status", {"cluster": "nowhere"}, "error").match == "not_recorded"
+    assert tape.answer("get_cluster_status", call.tool_args, "stop").match == "stop"  # stop stays strict
+    store.upsert_conversation(with_status)
+    r = Replayer.from_config(cfg, store, with_status.agent_name)
+    assert r.library and Replayer.from_config(cfg).library == []
+    cfg.data["replay"]["library_size"] = 0
+    assert Replayer.from_config(cfg, store, with_status.agent_name).library == []

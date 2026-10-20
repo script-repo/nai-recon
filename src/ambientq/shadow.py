@@ -70,7 +70,7 @@ def _run(store: SQLStore, cfg: Config, p: dict[str, Any], ins: Insight, live: Ha
     fresh = [c for c in store.list_conversations(agent=ins.agent_name or None, ingested_after=since)
              if c.conversation_id not in source and any(t.role == "user" for t in c.turns)]
     fresh = fresh[-limit:] if limit > 0 else fresh
-    replayer = Replayer.from_config(cfg)
+    replayer = Replayer.from_config(cfg, store, ins.agent_name or None)
     checks = load_checks(cfg.get("checks", "plugins", []), cfg.get("checks", "disabled", []))
     rows: list[dict[str, Any]] = []
     errors: list[str] = []

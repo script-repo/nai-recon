@@ -7,6 +7,7 @@ the CI ``helm`` job runs it.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -122,8 +123,8 @@ def test_proxy_mode_behind_oauth2_proxy(tmp_path):
     (["--set", "auth.mode=oidc", "--set", "auth.sessionSecret.secretName=s",
       "--set", "auth.oidc.issuer=https://i", "--set", "auth.oidc.clientId=c"], "publicUrl"),
     (["--set", "replicaCount=3"], "postgresUrlSecret"),
-    (["--set", "auth.mode=magic"], "auth.mode"),
+    (["--set", "auth.mode=magic"], r"auth[./]mode"),  # helm versions word schema errors differently
     (["--set", "alerts.webhooks[0].kind=slack"], "secretName"),
 ])
 def test_invalid_values_fail(args, message):
-    assert message in render_error(*args)
+    assert re.search(message, render_error(*args))

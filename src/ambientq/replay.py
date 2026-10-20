@@ -99,7 +99,7 @@ class TapeEntry:
 class TapeAnswer:
     content: str
     is_error: bool
-    match: str  # exact | nearest | not_recorded | stop
+    match: str  # exact | library | nearest | not_recorded | stop
     recorded_args: dict[str, Any] | None = None
 
 
@@ -108,6 +108,10 @@ class ToolTape:
     """Recorded tool results of one conversation, keyed by tool name and arguments."""
 
     entries: list[TapeEntry] = field(default_factory=list)
+    # Results recorded in *other* conversations of the same agent, consulted (and flagged
+    # ``library``) when the continuation calls a tool with arguments this conversation never
+    # recorded. Shared and never consumed.
+    library: list[TapeEntry] = field(default_factory=list)
 
     @classmethod
     def from_conversation(cls, conv: Conversation) -> ToolTape:
@@ -128,7 +132,7 @@ class ToolTape:
         return tape
 
     def fresh(self) -> ToolTape:
-        return ToolTape([TapeEntry(e.tool, e.args, e.result, e.is_error) for e in self.entries])
+        return ToolTape([TapeEntry(e.tool, e.args, e.result, e.is_error) for e in self.entries], self.library)
 
     def answer(self, tool: str, args: dict[str, Any] | None, policy: str = "nearest") -> TapeAnswer:
         key = canonical_args(args)
@@ -139,12 +143,23 @@ class ToolTape:
                 return TapeAnswer(e.result, e.is_error, "exact", e.args)
         if policy == "stop":
             return TapeAnswer("", False, "stop")
+        lib = next((e for e in reversed(self.library) if e.tool == tool and canonical_args(e.args) == key), None)
+        if lib is not None:
+            return TapeAnswer(lib.result, lib.is_error, "library", lib.args)
         if policy == "nearest" and same:
             fresh = [e for e in same if not e.used] or same
             best = max(fresh, key=lambda e: _arg_similarity(e.args, args or {}))
             best.used = True
             return TapeAnswer(best.result, best.is_error, "nearest", best.args)
         return TapeAnswer(NOT_RECORDED, True, "not_recorded")
+
+
+def build_library(convs: list[Conversation]) -> list[TapeEntry]:
+    """Successful tool results from these conversations, oldest first, for cross-conversation lookup."""
+    out: list[TapeEntry] = []
+    for c in convs:
+        out.extend(e for e in ToolTape.from_conversation(c).entries if not e.is_error)
+    return out
 
 
 def _arg_similarity(a: dict[str, Any], b: dict[str, Any]) -> float:
@@ -236,12 +251,17 @@ class Replayer:
     mode: str = "multi"
     max_steps: int = 8
     unmatched: str = "nearest"
+    library: list[TapeEntry] = field(default_factory=list)
 
     @classmethod
-    def from_config(cls, cfg: Any) -> Replayer:
-        return cls(mode=str(cfg.get("replay", "mode", "multi") or "multi"),
-                   max_steps=int(cfg.get("replay", "max_steps", 8) or 8),
-                   unmatched=str(cfg.get("replay", "unmatched", "nearest") or "nearest"))
+    def from_config(cls, cfg: Any, store: Any = None, agent: str | None = None) -> Replayer:
+        r = cls(mode=str(cfg.get("replay", "mode", "multi") or "multi"),
+                max_steps=int(cfg.get("replay", "max_steps", 8) or 8),
+                unmatched=str(cfg.get("replay", "unmatched", "nearest") or "nearest"))
+        size = int(cfg.get("replay", "library_size", 200) or 0)
+        if store is not None and size > 0 and r.mode == "multi":
+            r.library = build_library(store.list_conversations(agent=agent)[-size:])
+        return r
 
     def run(self, llm: LLMClient, h: Harness, conv: Conversation, cut: int,
             tape: ToolTape | None = None) -> Conversation:
@@ -250,6 +270,8 @@ class Replayer:
         if self.mode != "multi":
             raise ValueError(f"replay.mode must be 'multi' or 'single', got {self.mode!r}")
         tape = (tape or ToolTape.from_conversation(conv)).fresh()
+        if not tape.library:
+            tape.library = self.library
         return continue_conversation(llm, h, conv, cut, tape, max_steps=self.max_steps, unmatched=self.unmatched)
 
 

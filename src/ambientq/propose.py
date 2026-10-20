@@ -120,7 +120,7 @@ def propose(store: SQLStore, cfg: Config, insight_id: str, harness: Harness, llm
         controls = controls[: int(cfg.get("replay", "control_sample", 2))]
         agent = agent_llm or llm.with_model(cfg.get("replay", "model"))
         rep = replay(ins, failing, harness, patched, agent, llm, controls=controls,
-                     replayer=Replayer.from_config(cfg))
+                     replayer=Replayer.from_config(cfg, store, harness.agent))
         rep_dict = rep.to_dict()
         proposal["replay"] = rep_dict
         proposal["status"] = str(ProposalStatus.PENDING_APPROVAL if rep.improved else ProposalStatus.NOT_IMPROVED)
