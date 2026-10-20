@@ -113,6 +113,7 @@ def test_proxy_mode_behind_oauth2_proxy(tmp_path):
     cfg = load_config(docs, tmp_path)
     assert cfg.get("auth", "mode") == "proxy"
     assert cfg.data["auth"]["proxy"]["trusted_proxies"] == ["10.42.0.0/16"]
+    assert cfg.data["auth"]["proxy"]["user_header"] == "X-Auth-Request-User"  # what ingress-nginx overwrites
     assert cfg.get("auth", "public_url") == "http://ambientq.example.invalid"
     assert "auth-url" in " ".join(kind(docs, "Ingress")["metadata"]["annotations"])
 

@@ -2,7 +2,13 @@
 auth:
   mode: proxy
   sessionSecret: {secretName: ambientq-auth}
-  proxy: {trustedProxies: [10.42.0.0/16]}
+  # ingress-nginx passes oauth2-proxy's identity as X-Auth-Request-* (and overwrites
+  # any client-sent copy); read those, never headers a client could set itself.
+  proxy:
+    trustedProxies: [10.42.0.0/16]
+    userHeader: X-Auth-Request-User
+    emailHeader: X-Auth-Request-Email
+    groupsHeader: X-Auth-Request-Groups
   roles: {approver: [{group: sre}], viewer: ["*"]}
 ingress:
   enabled: true

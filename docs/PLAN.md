@@ -42,7 +42,7 @@ Milestones are committed and pushed as they land.
 
 Everything on the roadmap that does not need a live NAI endpoint (SPEC §11).
 Built on feature branches merged into `ambientq`; each milestone has unit
-tests, and the end-to-end demo is extended to use it.
+tests, and the end-to-end demo is extended to use it. **Status: all done (v0.2.0).**
 
 | # | Milestone | Done when |
 |---|---|---|
@@ -66,7 +66,8 @@ tests, and the end-to-end demo is extended to use it.
 * **Additive migrations only.** New columns are added with `ALTER TABLE ADD
   COLUMN` when missing, so v0.1 databases upgrade in place.
 * **Replay never calls real tools.** Multi-step replay answers tool calls only
-  from recorded results; anything not recorded is flagged, never executed.
+  from recorded results (the conversation's own, then the same call recorded in
+  the agent's other conversations); anything else is flagged, never executed.
 * **Approval stays human.** The dashboard can record a decision; it still
   cannot merge or deploy.
 

@@ -79,6 +79,8 @@ auth:
       secretName: ""
       key: clientSecret
   proxy:                   # identity headers from oauth2-proxy / Pomerium / your ingress
+    # Use the headers your proxy sets AND overwrites on every request (with ingress-nginx +
+    # oauth2-proxy: X-Auth-Request-User/-Email/-Groups), or clients can forge them.
     userHeader: X-Forwarded-User
     emailHeader: X-Forwarded-Email
     groupsHeader: X-Forwarded-Groups

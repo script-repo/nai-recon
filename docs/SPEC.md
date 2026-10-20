@@ -395,6 +395,13 @@ Before trusting a judge model on NAI, measure it against human labels.
   (`ambientq calibrate --sample`). `docs/CALIBRATION.md` explains how to label
   real traffic and run it against an NAI endpoint, and how to read the numbers
   (e.g. raise `judge.min_confidence` when precision is low).
+* Also reported: 95% Wilson intervals on precision and recall, a confidence
+  threshold sweep (0.0–0.9) with a recommended `judge.min_confidence`, and a
+  sizing estimate (tokens/day, minimum concurrency) from `--per-day`/`--rate`.
+* `ambientq export-labeling --out FILE [--since 30d] [--n 200] [--agent A]
+  [--team T] [--flagged-share 0.5]` writes a stratified sample of ingested
+  conversations as an unlabeled set (judge findings left out so labelers are
+  not anchored), audited as `exported_for_labeling`.
 
 ### 11.2 Multi-step replay with recorded tool results
 
@@ -406,7 +413,12 @@ Before trusting a judge model on NAI, measure it against human labels.
   (and under the original as control). Each tool call it makes is answered
   from the tape:
   1. exact match on name + canonical args (each recorded result used once, in order);
-  2. else `replay.unmatched` policy: `nearest` (default: same tool, most
+  2. else the same tool and canonical args recorded in **another** conversation
+     of the same agent (the *library*, the last `replay.library_size`
+     conversations, default 200; flagged `library`). Without it, a fix that
+     makes the agent call a tool it skipped would be answered with a synthetic
+     error and graded as a regression;
+  3. else `replay.unmatched` policy: `nearest` (default: same tool, most
      argument keys/values in common), `error` (return a structured
      "not recorded" tool error), or `stop` (end the continuation there).
   Every non-exact answer is **flagged** in the replay row
@@ -431,8 +443,13 @@ Before trusting a judge model on NAI, measure it against human labels.
   converted into GenAI-semconv LLM spans, so the rest of the pipeline is
   unchanged. Tool calls in a response and tool results in the next request
   become tool turns, so multi-step replay works on gateway traffic too.
-* Field mappings are configurable (`gateway.mappings`, dotted paths), so any
-  gateway log shape can be ingested without code.
+* Presets: `litellm`, `envoy-ai-gateway`, `kong` and `generic`
+  (`nai-gateway` is an alias of `generic`: Nutanix publishes no per-request
+  LLM log format, see `docs/GATEWAY.md`). Envoy access logs carry no bodies
+  unless configured to, so only usage and errors come through from them.
+* Field mappings are configurable (`gateway.mappings`, dotted paths;
+  `gateway.session_fields` adds session keys), so any gateway log shape can be
+  ingested without code.
 * The server also accepts `POST /v1/gateway/logs` (same token as OTLP) for
   gateways that can POST their logs (webhook / HTTP log sink).
 
@@ -452,11 +469,18 @@ Before trusting a judge model on NAI, measure it against human labels.
 * **Roles**: `viewer` < `approver` < `admin`, granted by user, email or group
   (`auth.roles`). Sessions are HMAC-signed cookies (`HttpOnly`, `SameSite=Lax`,
   `Secure` unless `auth.cookie_insecure`), secret from `auth.session_secret_env`.
+* The OIDC redirect URI to register is `{auth.public_url}/auth/callback`
+  (sign-in starts at `/login`, sign-out at `/logout`).
 * **Approvals**: approvers see Approve / Reject on a proposal page that shows
   the diff and the replay (and shadow) results side by side; POST forms carry a
   per-session **CSRF token** (double-submit, constant-time compared) and the
   `Origin` header is checked. Every decision, sign-in and sign-in failure is
-  written to the audit log. Admins can see the audit page and exports.
+  written to the audit log (`approved`/`rejected` with `via: dashboard`,
+  `sign_in`, `sign_in_failed`, `sign_out`, `decision_refused`, `access_denied`).
+  Admins can see the audit page and exports.
+* Responses carry a strict Content-Security-Policy (no scripts), `X-Frame-Options: DENY`,
+  `nosniff`, `no-store`. Team-scoped viewers get 404 for other teams' objects
+  in pages and the JSON API.
 * With `auth.mode: none` the dashboard has no write endpoints at all.
 * New UI look: system font stack (Inter / Segoe UI / Roboto fallbacks),
   sidebar navigation, cards, status pills, side-by-side diff/replay view,
@@ -503,30 +527,34 @@ Before trusting a judge model on NAI, measure it against human labels.
 * A `usage` table records tokens per (time, team, agent, model, source), where
   source is `agent` (from ingested LLM spans / gateway logs) or `ambientq`
   (judge, verifier, fixer, replay calls).
-* `pricing.models.<model>: {input_per_1k, output_per_1k}` and
+* `pricing.models.<model or glob>: {input_per_1k, output_per_1k}` (an exact
+  name wins over a glob such as `llama-3-1-*`; globs are tried in config order) and
   `pricing.default`, in `pricing.currency` (default USD). On-prem GPU cost can
   be expressed as an effective price per 1k tokens.
-* `ambientq usage [--since 30d] [--by agent|model|team] [--json]`; also in the
+* `ambientq usage [--since 30d] [--by agent|model|team|source] [--team T] [--json]`; also in the
   dashboard and the monthly report.
 
 ### 11.8 Alerts
 
-* `alerts.webhooks: [{kind: slack|teams|generic, url_env: ENV, min_severity: high}]`
+* `alerts.webhooks: [{kind: slack|teams|generic, url_env: ENV, min_severity: high, teams: [..]}]`
   — URLs are secrets, read from env vars. After each `evaluate`, one message per
   new insight at or above `min_severity`, and per **regression** (a RESOLVED
   insight that recurs). Slack incoming-webhook and Teams (Adaptive Card via
   Workflows/incoming webhook) payloads; `generic` posts JSON. Each delivery
-  (and failure) goes to the audit log; failures never fail the run.
+  (and failure) goes to the audit log as `alert_sent`/`alert_failed`, without
+  the URL; failures never fail the run. Links point at `auth.public_url` when set.
 
 ### 11.9 Multi-agent, multi-team
 
 * `agents: [{name, harness, team}]` lists every agent this install grades
-  (the v0.1 `harness.path` still works as a single agent). `evaluate`,
-  `investigate`, `propose` take `--agent`; without it `evaluate` runs every agent.
+  (the v0.1 `harness.path` still works as a single agent). `evaluate --agent`
+  grades one; without it `evaluate` runs every agent, one run each.
+  `investigate`, `propose` and `shadow` use the harness of the insight's agent.
+  Conversations with no agent name are graded with the first agent.
 * Each conversation, run, insight and proposal carries a `team`, taken from the
   `agents` entry, else the span/resource attribute `ambientq.team`, else
   `teams.default` (`default`).
-* CLI `--team` filters lists and reports; the dashboard has a team switcher, and
+* CLI `--team` filters `insights`, `proposals` (new list command), `usage` and `report`; the dashboard has a team switcher, and
   `auth.roles` entries can be scoped to teams (`approver: ["alice@x", {group: "sre", teams: ["platform"]}]`).
 
 ### 11.10 Packaging
@@ -537,8 +565,10 @@ Before trusting a judge model on NAI, measure it against human labels.
   the image keylessly with cosign (GitHub OIDC). Never on ordinary pushes.
 * CI gains a `postgres` job with a PostgreSQL service container that runs the
   store and end-to-end tests against Postgres.
-* Helm chart: values for auth, alerts, pricing, agents/teams, shadow; probes,
-  pod security context, optional Ingress, ServiceMonitor-free (no extra CRDs).
+* Helm chart 0.2.0: values for auth, alerts, pricing, agents/teams, shadow; probes,
+  pod security context, optional Ingress and PodDisruptionBudget, a
+  `values.schema.json` so bad values fail at render time, ServiceMonitor-free
+  (no extra CRDs). Release and verification steps: `docs/RELEASE.md`.
 * `docs/SE-DEMO.md`: a 10-minute demo script for Nutanix SEs.
 
 ## 12. Roadmap (after v0.2)
