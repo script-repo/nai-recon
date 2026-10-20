@@ -284,11 +284,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     host = args.host or cfg.get("server", "host")
     port = args.port or int(cfg.get("server", "port"))
     token = cfg.secret("server", "ingest_token_env")
+    from ambientq.auth import Auth
     from ambientq.ingest.gateway import mappings_from_config
 
-    srv = make_server(App(store, token, gateway_mappings=mappings_from_config(cfg.section("gateway"))), host, port)
+    auth = Auth.from_config(cfg)
+    app = App(store, token, gateway_mappings=mappings_from_config(cfg.section("gateway")), auth=auth, cfg=cfg)
+    srv = make_server(app, host, port)
     print(f"ambientq {__version__}: dashboard http://{host}:{port}/  OTLP/HTTP http://{host}:{port}/v1/traces"
-          f"{'  (ingest token required)' if token else ''}")
+          f"{'  (ingest token required)' if token else ''}  sign-in: {auth.mode}"
+          f"{'' if auth.enabled else ' (read-only dashboard)'}")
     with contextlib.suppress(KeyboardInterrupt):
         srv.serve_forever()
     return 0

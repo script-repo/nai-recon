@@ -147,7 +147,8 @@ def propose(store: SQLStore, cfg: Config, insight_id: str, harness: Harness, llm
     return proposal
 
 
-def decide(store: SQLStore, proposal_id: str, by: str, *, approve: bool, note: str = "") -> dict[str, Any]:
+def decide(store: SQLStore, proposal_id: str, by: str, *, approve: bool, note: str = "",
+           via: str = "cli") -> dict[str, Any]:
     p = store.get_proposal(proposal_id)
     if p is None:
         raise KeyError(f"no proposal {proposal_id!r}")
@@ -159,5 +160,6 @@ def decide(store: SQLStore, proposal_id: str, by: str, *, approve: bool, note: s
     p["approved_by"], p["approved_at"] = by, now_s()
     p["decision_note"] = note or None
     store.save_proposal(p)
-    store.audit(by, "approved" if approve else "rejected", p["proposal_id"], {"note": note, "insight": p["insight_id"]})
+    store.audit(by, "approved" if approve else "rejected", p["proposal_id"], {"note": note, "insight": p["insight_id"],
+                                                                           "via": via, "team": p.get("team")})
     return p
