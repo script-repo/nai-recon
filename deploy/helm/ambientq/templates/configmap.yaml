@@ -1,9 +1,11 @@
+{{- include "ambientq.validate" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "ambientq.name" . }}
   labels: {{- include "ambientq.labels" . | nindent 4 }}
 data:
+  # No secrets here: every *_env key names an env var filled from a Secret.
   ambientq.yaml: |
     store: {url: "sqlite:////data/ambientq.db"}
     harness: {path: "/harness/repo/{{ .Values.harness.subPath }}"}
@@ -11,12 +13,62 @@ data:
       base_url: {{ .Values.nai.baseUrl | quote }}
       api_key_env: NAI_API_KEY
       model: {{ .Values.nai.model | quote }}
-      verifier_model: {{ .Values.nai.verifierModel | default "" | quote }}
+      verifier_model: {{ include "ambientq.strOrNull" .Values.nai.verifierModel }}
       {{- if .Values.nai.caConfigMap }}
       ca_bundle: /etc/ambientq/ca/ca.crt
       {{- end }}
     replay:
-      model: {{ .Values.nai.replayModel | default "" | quote }}
+      model: {{ include "ambientq.strOrNull" .Values.nai.replayModel }}
       {{- toYaml (omit .Values.config.replay "model") | nindent 6 }}
     server: {host: 0.0.0.0, port: 8080, ingest_token_env: AMBIENTQ_INGEST_TOKEN}
     {{- toYaml (omit .Values.config "replay") | nindent 4 }}
+    agents:
+    {{- range .Values.agents }}
+      - name: {{ .name | quote }}
+        harness: {{ if hasPrefix "/" (.harness | default "") }}{{ .harness | quote }}{{ else }}{{ printf "/harness/repo/%s" (.harness | default $.Values.harness.subPath) | quote }}{{ end }}
+        {{- if .team }}
+        team: {{ .team | quote }}
+        {{- end }}
+    {{- else }} []
+    {{- end }}
+    teams: {{- toYaml .Values.teams | nindent 6 }}
+    shadow: {{- toYaml .Values.shadow | nindent 6 }}
+    pricing: {{- toYaml .Values.pricing | nindent 6 }}
+    alerts:
+      min_severity: {{ .Values.alerts.minSeverity | quote }}
+      on_regression: {{ .Values.alerts.onRegression }}
+      webhooks:
+      {{- range $i, $w := .Values.alerts.webhooks }}
+        - kind: {{ $w.kind | quote }}
+          url_env: AMBIENTQ_ALERT_WEBHOOK_{{ $i }}
+          min_severity: {{ $w.minSeverity | default $.Values.alerts.minSeverity | quote }}
+      {{- else }} []
+      {{- end }}
+    {{- with .Values.forge }}
+    forge:
+      kind: {{ include "ambientq.strOrNull" .kind }}
+      api_url: {{ include "ambientq.strOrNull" .apiUrl }}
+      repo: {{ include "ambientq.strOrNull" .repo }}
+      token_env: FORGE_TOKEN
+      base_branch: {{ .baseBranch | quote }}
+    {{- end }}
+    {{- with .Values.auth }}
+    auth:
+      mode: {{ .mode | quote }}
+      session_secret_env: AMBIENTQ_SESSION_SECRET
+      session_ttl_s: {{ int .sessionTtlSeconds }}
+      cookie_insecure: {{ .cookieInsecure }}
+      public_url: {{ include "ambientq.strOrNull" (include "ambientq.publicUrl" $) }}
+      oidc:
+        issuer: {{ include "ambientq.strOrNull" .oidc.issuer }}
+        client_id: {{ include "ambientq.strOrNull" .oidc.clientId }}
+        client_secret_env: AMBIENTQ_OIDC_CLIENT_SECRET
+        scopes: {{ .oidc.scopes | quote }}
+        groups_claim: {{ .oidc.groupsClaim | quote }}
+      proxy:
+        user_header: {{ .proxy.userHeader | quote }}
+        email_header: {{ .proxy.emailHeader | quote }}
+        groups_header: {{ .proxy.groupsHeader | quote }}
+        trusted_proxies: {{- toYaml .proxy.trustedProxies | nindent 10 }}
+      roles: {{- toYaml .roles | nindent 8 }}
+    {{- end }}

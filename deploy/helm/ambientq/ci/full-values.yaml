@@ -1,0 +1,36 @@
+# CI: every optional feature on (OIDC sign-in, Ingress with TLS, alerts, Postgres, agents/teams).
+replicaCount: 2
+harness: {repo: https://git.example.invalid/ai/agents.git, gitSecret: git-token}
+agents:
+  - {name: nkp-ops-agent, harness: agents/nkp-ops, team: platform}
+  - {name: docs-agent, harness: /harness/repo/agents/docs, team: docs}
+teams: {default: platform}
+shadow: {enabled: true, since: 12h, limit: 10}
+pricing:
+  currency: EUR
+  models:
+    llama-3-1-70b-judge: {input_per_1k: 0.002, output_per_1k: 0.004}
+auth:
+  mode: oidc
+  sessionSecret: {secretName: ambientq-auth}
+  oidc:
+    issuer: https://idp.example.invalid/realms/ai
+    clientId: ambientq
+    clientSecret: {secretName: ambientq-auth}
+  roles:
+    admin: [admin@example.invalid]
+    approver: [{group: sre, teams: [platform]}]
+alerts:
+  webhooks:
+    - {kind: slack, secretName: ambientq-alerts, key: slackUrl}
+    - {kind: teams, secretName: ambientq-alerts, key: teamsUrl, minSeverity: medium}
+forge: {kind: github, apiUrl: https://api.github.com, repo: example/agents, tokenSecret: {secretName: forge-token}}
+ingestTokenSecret: ambientq-ingest
+persistence: {postgresUrlSecret: ambientq-pg}
+ingress:
+  enabled: true
+  className: nginx
+  host: ambientq.example.invalid
+  tlsSecret: ambientq-tls
+podDisruptionBudget: {enabled: true}
+networkPolicy: {egressCIDRs: [10.0.0.0/8]}

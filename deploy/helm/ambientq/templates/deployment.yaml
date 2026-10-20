@@ -1,4 +1,4 @@
-{{- if .Values.persistence.enabled }}
+{{- if include "ambientq.sqlitePVC" . }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -18,47 +18,31 @@ metadata:
   name: {{ include "ambientq.name" . }}
   labels: {{- include "ambientq.labels" . | nindent 4 }}
 spec:
-  replicas: 1   # SQLite: single writer. Use Postgres before scaling out.
-  strategy: {type: Recreate}
+  replicas: {{ .Values.replicaCount }}   # SQLite: single writer. Use Postgres before scaling out.
+  strategy: {{ if include "ambientq.sqlitePVC" . }}{type: Recreate}{{ else }}{type: RollingUpdate}{{ end }}
   selector:
     matchLabels: {{- include "ambientq.selector" . | nindent 6 }}
   template:
     metadata:
       labels: {{- include "ambientq.selector" . | nindent 8 }}
+        app.kubernetes.io/component: server
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       automountServiceAccountToken: false
-      securityContext: {fsGroup: 10001}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- include "ambientq.scheduling" . | nindent 6 }}
       initContainers: {{- include "ambientq.gitInit" . | nindent 8 }}
       containers:
         - name: ambientq
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "ambientq.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["serve"]
           env: {{- include "ambientq.env" . | nindent 12 }}
           ports: [{name: http, containerPort: 8080}]
-          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
-          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 30}
+          livenessProbe: {{- toYaml .Values.probes.liveness | nindent 12 }}
+          readinessProbe: {{- toYaml .Values.probes.readiness | nindent 12 }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
-          securityContext: {{- include "ambientq.securityContext" . | nindent 12 }}
-          volumeMounts:
-            - {name: config, mountPath: /etc/ambientq/ambientq.yaml, subPath: ambientq.yaml}
-            - {name: data, mountPath: /data}
-            - {name: harness, mountPath: /harness}
-            - {name: tmp, mountPath: /tmp}
-            {{- if .Values.nai.caConfigMap }}
-            - {name: ca, mountPath: /etc/ambientq/ca}
-            {{- end }}
-      volumes:
-        - {name: config, configMap: {name: {{ include "ambientq.name" . }}}}
-        {{- if .Values.persistence.enabled }}
-        - {name: data, persistentVolumeClaim: {claimName: {{ include "ambientq.name" . }}-data}}
-        {{- else }}
-        - {name: data, emptyDir: {}}
-        {{- end }}
-        - {name: harness, emptyDir: {}}
-        - {name: tmp, emptyDir: {}}
-        {{- if .Values.nai.caConfigMap }}
-        - {name: ca, configMap: {name: {{ .Values.nai.caConfigMap }}}}
-        {{- end }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts: {{- include "ambientq.volumeMounts" . | nindent 12 }}
+      volumes: {{- include "ambientq.volumes" . | nindent 8 }}

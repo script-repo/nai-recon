@@ -1,7 +1,10 @@
 image:
-  repository: ghcr.io/your-org/ambientq
-  tag: "0.1.0"
+  repository: ghcr.io/script-repo/ambientq
+  tag: ""                  # defaults to the chart's appVersion
   pullPolicy: IfNotPresent
+
+# Pods: 1 with SQLite (single writer). More than 1 needs persistence.postgresUrlSecret.
+replicaCount: 1
 
 # The NAI (or any OpenAI-compatible) endpoint used as judge / verifier / fixer.
 nai:
@@ -9,9 +12,10 @@ nai:
   model: llama-3-1-70b-judge                   # NAI endpoint name
   verifierModel: ""                            # optional second endpoint for the verifier
   replayModel: ""                              # the agent's own endpoint, for replay
-  # Existing Secret holding the NAI API key (key: apiKey). Create it yourself:
+  # Existing Secret holding the NAI API key. Create it yourself:
   #   kubectl create secret generic nai-judge-key --from-literal=apiKey=...
   apiKeySecret: nai-judge-key
+  apiKeySecretKey: apiKey
   # Optional ConfigMap with the NAI cluster CA (key: ca.crt) for private PKI.
   caConfigMap: ""
 
@@ -22,13 +26,87 @@ harness:
   subPath: harness         # directory inside the repo that holds harness.yaml
   gitSecret: ""            # optional Secret with key 'token' for private repos
 
+# Several agents in the same harness repo: [{name, harness, team}]. A relative
+# `harness` is a directory inside the checked-out repo. Empty = the single
+# harness.subPath agent.
+agents: []
+teams:
+  default: default
+
 config:
   sampling: {rate: 0.2, seed: ambientq, max_priority: 50}
   budget: {max_tokens_per_run: 400000, max_conversations_per_run: 200}
   judge: {max_findings: 8, min_confidence: 0.5}
   verifier: {enabled: true, llm: true}
   insights: {similarity: 0.5, resolve_after_runs: 2}
-  replay: {enabled: true, max_conversations: 5, control_sample: 2}
+  replay:
+    enabled: true
+    max_conversations: 5
+    control_sample: 2
+    mode: multi            # multi | single
+    max_steps: 8
+    unmatched: nearest     # nearest | error | stop
+  # Field mappings for gateway / proxy logs (POST /v1/gateway/logs, ingest --format proxy-log).
+  gateway: {session_fields: [], mappings: {}}
+
+# Shadow-test pending proposals on new traffic after every evaluate.
+shadow:
+  enabled: false
+  since: 24h
+  limit: 20
+
+# Effective price per 1k tokens, for `ambientq usage` and the monthly report.
+pricing:
+  currency: USD
+  default: {input_per_1k: 0.0, output_per_1k: 0.0}
+  models: {}               # e.g. {llama-3-1-70b-judge: {input_per_1k: 0.002, output_per_1k: 0.002}}
+
+# Dashboard sign-in and roles. Secrets are only ever read from existing Secrets.
+auth:
+  mode: none               # none (read-only dashboard) | oidc | proxy
+  publicUrl: ""            # external URL; defaults to the Ingress host
+  sessionTtlSeconds: 28800
+  cookieInsecure: false    # only for plain-http test setups
+  sessionSecret:           # required for oidc/proxy: kubectl create secret generic ambientq-auth --from-literal=sessionSecret=$(openssl rand -hex 32)
+    secretName: ""
+    key: sessionSecret
+  oidc:
+    issuer: ""             # e.g. https://keycloak.example.local/realms/ai
+    clientId: ""
+    scopes: openid email profile
+    groupsClaim: groups
+    clientSecret:
+      secretName: ""
+      key: clientSecret
+  proxy:                   # identity headers from oauth2-proxy / Pomerium / your ingress
+    userHeader: X-Forwarded-User
+    emailHeader: X-Forwarded-Email
+    groupsHeader: X-Forwarded-Groups
+    trustedProxies: ["127.0.0.1/32", "::1/128"]   # add your ingress controller's pod CIDR
+  roles:                   # users, emails or {group: g, teams: [t]}
+    admin: []
+    approver: []
+    viewer: ["*"]
+
+# Alerts after each evaluate. Each webhook URL comes from a Secret.
+alerts:
+  minSeverity: high
+  onRegression: true
+  webhooks: []
+  # - kind: slack          # slack | teams | generic
+  #   minSeverity: high
+  #   secretName: ambientq-alerts
+  #   key: slackUrl
+
+# Branch / PR creation for approved proposals.
+forge:
+  kind: ""                 # github | gitlab | gitea
+  apiUrl: ""
+  repo: ""
+  baseBranch: main
+  tokenSecret:             # Secret with the forge token
+    secretName: ""
+    key: token
 
 # Optional bearer token agents must send to POST /v1/traces (Secret key: token).
 ingestTokenSecret: ""
@@ -42,18 +120,59 @@ persistence:
   enabled: true
   size: 5Gi
   storageClass: ""          # e.g. nutanix-volume
-  # Set to a PostgreSQL URL secret to use Postgres instead of SQLite (Secret key: url).
+  # Existing Secret with a PostgreSQL URL (key: url). When set, the store is
+  # Postgres, no PVC is created and the pods may run anywhere / scale out.
   postgresUrlSecret: ""
 
 service:
   type: ClusterIP
   port: 8080
 
+ingress:
+  enabled: false
+  className: ""
+  host: ambientq.example.local
+  path: /
+  pathType: Prefix
+  annotations: {}
+  # e.g. oauth2-proxy in front (with auth.mode: proxy):
+  #   nginx.ingress.kubernetes.io/auth-url: https://oauth2.example.local/oauth2/auth
+  #   nginx.ingress.kubernetes.io/auth-signin: https://oauth2.example.local/oauth2/start?rd=$scheme://$host$request_uri
+  #   nginx.ingress.kubernetes.io/auth-response-headers: X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups
+  tlsSecret: ""             # TLS Secret for the host; empty = plain http
+
 networkPolicy:
   enabled: true
-  # CIDRs the pod may reach besides DNS: the NAI endpoint (and your git server).
+  # CIDRs the pod may reach besides DNS: the NAI endpoint, your git server, and,
+  # when used, the OIDC issuer, webhook targets and PostgreSQL.
   egressCIDRs: []
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+probes:
+  liveness: {httpGet: {path: /healthz, port: http}, periodSeconds: 30, timeoutSeconds: 3, failureThreshold: 3}
+  readiness: {httpGet: {path: /healthz, port: http}, periodSeconds: 10, timeoutSeconds: 3}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile: {type: RuntimeDefault}
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001
+  capabilities: {drop: ["ALL"]}
+  seccompProfile: {type: RuntimeDefault}
 
 resources:
   requests: {cpu: 100m, memory: 256Mi}
   limits: {cpu: "1", memory: 1Gi}
+
+nodeSelector: {}
+tolerations: []
