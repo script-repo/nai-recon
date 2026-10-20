@@ -15,7 +15,7 @@ from ambientq.harness import Harness
 from ambientq.insights import jaccard
 from ambientq.judge.rubric import Rubric, build_rubric
 from ambientq.llm import LLMClient, LLMError
-from ambientq.models import Conversation, Finding, Insight, Location, Patch
+from ambientq.models import Conversation, Finding, Insight, Location, Patch, PatchKind
 from ambientq.store import SQLStore
 
 LOCATE_SYSTEM = """\
@@ -45,10 +45,11 @@ class Investigation:
     locate_reason: str
     patch: Patch | None
     examples: list[dict[str, Any]]
+    kind: str = "prompt"
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "insight_id": self.insight.insight_id, "title": self.insight.title,
+            "insight_id": self.insight.insight_id, "title": self.insight.title, "kind": self.kind,
             "location": str(self.location), "locate_reason": self.locate_reason,
             "target": self.patch.original if self.patch else None, "diff": self.patch.diff if self.patch else None,
             "rationale": self.patch.rationale if self.patch else None,
@@ -172,22 +173,40 @@ def propose_patch(insight: Insight, h: Harness, loc: Location, examples: list[di
     _validate(h, loc, replacement)
     diff = make_diff(h, loc, replacement)
     return Patch(insight_id=insight.insight_id, location=loc, original=target, replacement=replacement,
-                 diff=diff, rationale=str(data.get("rationale", "")))
+                 diff=diff, rationale=str(data.get("rationale", "")), kind=str(PatchKind.PROMPT))
 
 
 def investigate(store: SQLStore, insight_id: str, h: Harness, llm: LLMClient | None,
-                goal: str | None = None) -> Investigation:
+                goal: str | None = None, kind: str | None = None) -> Investigation:
+    """Locate the cause of an insight and draft a patch of the right kind.
+
+    ``kind`` forces a patch kind (prompt, tool_description, tool_schema,
+    guardrail, config); by default it is chosen from the insight.
+    """
+    from ambientq import patches
+
     ins = store.get_insight(insight_id)
     if ins is None:
         raise KeyError(f"no insight {insight_id!r} (or prefix is ambiguous)")
     rubric = build_rubric(h, goal)
     findings = [f for f in store.findings(insight_id=ins.insight_id) if f.verified is not False]
-    loc, reason = locate(ins, h, rubric, llm, findings)
     examples = []
     for f in findings[:3]:
         conv = store.get_conversation(f.conversation_id)
         if conv:
             examples.append(_excerpt(conv, f))
-    patch = propose_patch(ins, h, loc, examples, llm) if llm is not None else None
-    store.audit("ambientq", "investigated", ins.insight_id, {"location": str(loc), "patched": bool(patch)})
-    return Investigation(insight=ins, location=loc, locate_reason=reason, patch=patch, examples=examples)
+    pk = PatchKind(kind) if kind else patches.choose_kind(ins, h, findings)
+    patch: Patch | None
+    if pk == PatchKind.PROMPT:
+        loc, reason = locate(ins, h, rubric, llm, findings)
+        patch = propose_patch(ins, h, loc, examples, llm) if llm is not None else None
+    else:
+        target = patches.target_for(pk, ins, h)
+        loc, reason = patches.target_location(h, target), f"{target.describe()} governs this behaviour"
+        patch = patches.propose_structured(ins, h, target, examples, llm) if llm is not None else None
+        if patch is not None:
+            loc = patch.location
+    store.audit("ambientq", "investigated", ins.insight_id,
+                {"location": str(loc), "kind": str(pk), "patched": bool(patch)})
+    return Investigation(insight=ins, location=loc, locate_reason=reason, patch=patch, examples=examples,
+                         kind=str(pk))

@@ -156,10 +156,11 @@ def _arg_similarity(a: dict[str, Any], b: dict[str, Any]) -> float:
     return (same_vals + 0.5 * same_keys) / len(keys)
 
 
-def _append_response(turns: list[Turn], resp: Any) -> list[Turn]:
-    """Append the model's response; return the new tool-call turns."""
+def _append_response(turns: list[Turn], resp: Any, h: Harness) -> list[Turn]:
+    """Append the model's response (through the harness's guardrail layer); return the new tool-call turns."""
     if resp.content:
-        turns.append(Turn(index=len(turns), role="assistant", content=resp.content, model=resp.model))
+        turns.append(Turn(index=len(turns), role="assistant", content=h.apply_guardrails(resp.content),
+                          model=resp.model))
     calls = []
     for tc in resp.tool_calls:
         fn = tc.get("function", {})
@@ -189,7 +190,7 @@ def continue_conversation(llm: LLMClient, h: Harness, conv: Conversation, cut: i
         resp = llm.chat(turns_to_messages(h.system_prompt(), turns), purpose="replay", tools=tools,
                         max_tokens=1024)
         steps += 1
-        calls = _append_response(turns, resp)
+        calls = _append_response(turns, resp, h)
         if not calls:
             reason = "final_answer"
             break
@@ -221,7 +222,7 @@ def regenerate(llm: LLMClient, h: Harness, conv: Conversation, cut: int) -> Conv
     resp = llm.chat(turns_to_messages(h.system_prompt(), prefix), purpose="replay",
                     tools=[t.openai() for t in h.tools] or None, max_tokens=1024)
     turns = [Turn.from_dict(t.to_dict()) for t in prefix]
-    _append_response(turns, resp)
+    _append_response(turns, resp, h)
     return Conversation(conversation_id=f"{conv.conversation_id}~replay", agent_name=conv.agent_name,
                         turns=turns, team=conv.team,
                         metadata={"replay_of": conv.conversation_id, "cut": cut, "mode": "single", "steps": 1,

@@ -126,11 +126,12 @@ def cmd_investigate(args: argparse.Namespace) -> int:
     cfg, store = _ctx(args)
     harness = Harness.load(args.harness or cfg.get("harness", "path"))
     inv = investigate(store, args.insight, harness, None if args.locate_only else _llm(cfg, store),
-                      cfg.get("judge", "goal"))
+                      cfg.get("judge", "goal"), kind=args.kind)
     if args.json:
         _print(inv.to_dict(), True)
         return 0
     print(f"insight:  {inv.insight.title}")
+    print(f"kind:     {inv.kind}")
     print(f"location: {inv.location}  ({inv.locate_reason})")
     if inv.patch:
         print(f"\nrationale: {inv.patch.rationale}\n")
@@ -147,12 +148,12 @@ def cmd_propose(args: argparse.Namespace) -> int:
     if args.replay_mode:
         cfg.data["replay"]["mode"] = args.replay_mode
     p = propose(store, cfg, args.insight, harness, _llm(cfg, store), do_replay=not args.no_replay,
-                branch=args.branch, open_pr=args.open_pr)
+                branch=args.branch, open_pr=args.open_pr, kind=args.kind)
     if args.json:
         _print(p, True)
         return 0
     print(f"proposal {p['proposal_id']}: {p['status']}")
-    print(f"target:   {p['file']}:{p['start_line']}-{p['end_line']}")
+    print(f"target:   {p['file']}:{p['start_line']}-{p['end_line']} ({p.get('kind', 'prompt')})")
     if p.get("replay"):
         r = p["replay"]
         print(f"replay:   fixed {r['fixed']}, still failing {r['still_failing']}, regressions {r['regressions']}"
@@ -251,6 +252,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("insight")
     s.add_argument("--harness")
     s.add_argument("--locate-only", action="store_true", help="no LLM: only map to file/lines")
+    s.add_argument("--kind", choices=["prompt", "tool_description", "tool_schema", "guardrail", "config"], help="force what to fix (default: chosen from the insight)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_investigate)
 
@@ -262,6 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="multi: run to a final answer on recorded tool results (default); single: next turn only")
     s.add_argument("--branch", action="store_true", help="commit the patch to a new branch in the harness repo")
     s.add_argument("--open-pr", action="store_true", help="push the branch and open a PR/MR on the configured forge")
+    s.add_argument("--kind", choices=["prompt", "tool_description", "tool_schema", "guardrail", "config"], help="force what to fix (default: chosen from the insight)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_propose)
 

@@ -89,8 +89,8 @@ def pr_body(ins_title: str, rationale: str, diff: str, rep: dict[str, Any] | Non
 
 def propose(store: SQLStore, cfg: Config, insight_id: str, harness: Harness, llm: LLMClient, *,
             do_replay: bool | None = None, branch: bool = False, open_pr: bool = False,
-            agent_llm: LLMClient | None = None) -> dict[str, Any]:
-    inv = investigate(store, insight_id, harness, llm, cfg.get("judge", "goal"))
+            agent_llm: LLMClient | None = None, kind: str | None = None) -> dict[str, Any]:
+    inv = investigate(store, insight_id, harness, llm, cfg.get("judge", "goal"), kind=kind)
     if inv.patch is None:
         raise RuntimeError("no patch could be generated")
     patch, ins = inv.patch, inv.insight
@@ -99,6 +99,8 @@ def propose(store: SQLStore, cfg: Config, insight_id: str, harness: Harness, llm
         "file": patch.location.file, "start_line": patch.location.start_line, "end_line": patch.location.end_line,
         "diff": patch.diff, "rationale": patch.rationale, "replay": None, "branch": None, "pr_url": None,
         "approved_by": None, "approved_at": None, "created_at": now_s(),
+        "kind": patch.kind, "team": ins.team or store.default_team(ins.agent_name), "agent_name": ins.agent_name,
+        "shadow": None, "decision_note": None,
     }
     patched = harness.with_replacement(patch.location, patch.replacement)
     run_replay = cfg.get("replay", "enabled", True) if do_replay is None else do_replay
@@ -141,7 +143,7 @@ def propose(store: SQLStore, cfg: Config, insight_id: str, harness: Harness, llm
     store.save_proposal(proposal)
     store.audit("ambientq", "proposed", proposal["proposal_id"], {
         "insight": ins.insight_id, "status": proposal["status"], "branch": proposal["branch"],
-        "pr_url": proposal["pr_url"], "location": str(patch.location)})
+        "pr_url": proposal["pr_url"], "location": str(patch.location), "kind": patch.kind})
     return proposal
 
 
@@ -155,6 +157,7 @@ def decide(store: SQLStore, proposal_id: str, by: str, *, approve: bool, note: s
         raise ValueError("an approver name is required")
     p["status"] = str(ProposalStatus.APPROVED if approve else ProposalStatus.REJECTED)
     p["approved_by"], p["approved_at"] = by, now_s()
+    p["decision_note"] = note or None
     store.save_proposal(p)
     store.audit(by, "approved" if approve else "rejected", p["proposal_id"], {"note": note, "insight": p["insight_id"]})
     return p

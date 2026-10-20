@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +36,19 @@ class Guardrail:
     text: str
     pattern: str | None = None
     location: Location | None = None
+    action: str | None = None  # None (detect only) | redact | block: what the guardrail layer does
+    section: str = "rules"  # rules | forbidden_patterns
+
+    def apply(self, text: str) -> str:
+        """What the agent's guardrail layer would let through (used by replay)."""
+        if not self.pattern or self.action not in ("redact", "block"):
+            return text
+        rx = re.compile(self.pattern)
+        if not rx.search(text):
+            return text
+        if self.action == "block":
+            return "I can't share that."
+        return rx.sub("[REDACTED]", text)
 
 
 @dataclass
@@ -110,6 +124,11 @@ class Harness:
             h.update("\n".join(self.files[rel]).encode())
         return f"sha256:{h.hexdigest()[:12]}"
 
+    def apply_guardrails(self, text: str) -> str:
+        for g in self.guardrails:
+            text = g.apply(text)
+        return text
+
     def valid_location(self, loc: Location) -> bool:
         lines = self.files.get(loc.file)
         return bool(lines) and 1 <= loc.start_line <= loc.end_line <= len(lines or [])
@@ -182,9 +201,9 @@ def _load_guardrails(path: Path, rel: str) -> list[Guardrail]:
             n += 1
             if isinstance(item, dict):
                 g = Guardrail(gid=f"R-G{n}", text=str(item.get("description") or item.get("rule") or item.get("pattern")),
-                              pattern=item.get("pattern"))
+                              pattern=item.get("pattern"), action=item.get("action"), section=key)
             else:
-                g = Guardrail(gid=f"R-G{n}", text=str(item))
+                g = Guardrail(gid=f"R-G{n}", text=str(item), section=key)
             g.location = _node_loc(node, rel) if node is not None else None
             out.append(g)
     return out

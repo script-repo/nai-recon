@@ -147,6 +147,59 @@ def fix(user: str) -> dict[str, Any]:
                          "without changing any other behaviour."}
 
 
+def fix_tool_description(user: str) -> dict[str, Any]:
+    cur = _block(user, "current_json") or {}
+    desc = str(cur.get("description", "")).rstrip()
+    defect = user.lower()
+    extra = " MANDATORY: ask the user to confirm the cluster, node pool and replica count first, and call it " \
+            "only after they confirm." if "confirm" in defect else " MANDATORY: use it only when its purpose applies."
+    return {"description": desc + extra,
+            "rationale": "The description did not say when the tool may be called. Stating the precondition "
+                         "where the model reads the tool keeps the rule next to the action it governs."}
+
+
+def fix_tool_schema(user: str) -> dict[str, Any]:
+    cur = _block(user, "current_json") or {}
+    params = dict(cur.get("parameters") or {"type": "object", "properties": {}})
+    props = params.get("properties") or {}
+    params["required"] = sorted(props)
+    return {"parameters": params,
+            "rationale": "Marking every argument required makes the model supply them and lets the gateway "
+                         "reject incomplete calls."}
+
+
+def fix_guardrail(user: str) -> dict[str, Any]:
+    cur = _block(user, "current_json") or {}
+    target = cur.get("targeted") if isinstance(cur, dict) else None
+    if isinstance(target, dict) and target.get("pattern"):
+        g = {**target, "action": "redact"}
+        return {"action": "replace", "guardrail": g,
+                "rationale": "The pattern only detected leaks after the fact. Enforcing it with action "
+                             "redact makes the guardrail layer remove matches before the answer reaches the user."}
+    text = target if isinstance(target, str) else "Never reveal credentials."
+    return {"action": "replace", "guardrail": {"description": f"{text} MANDATORY."},
+            "rationale": "Makes the rule explicit and mandatory."}
+
+
+def fix_config(user: str) -> dict[str, Any]:
+    cfg = _block(user, "current_json") or {}
+    if isinstance(cfg, dict) and isinstance(cfg.get("max_turns"), int):
+        return {"key": "max_turns", "value": cfg["max_turns"] + 4,
+                "rationale": "Conversations hit the step limit before finishing; a few more steps let them "
+                             "complete without changing behaviour."}
+    return {"key": "temperature", "value": 0.0, "rationale": "Lower temperature makes the agent follow rules "
+                                                            "more consistently."}
+
+
+def _tool_mandatory(tools: list[dict[str, Any]], name: str, *needles: str) -> bool:
+    for t in tools or []:
+        fn = t.get("function", t)
+        if fn.get("name") == name:
+            d = str(fn.get("description", "")).lower()
+            return "mandatory" in d and all(n.lower() in d for n in needles)
+    return False
+
+
 def _mandatory(system: str, *needles: str) -> bool:
     for line in system.splitlines():
         low = line.lower()
@@ -155,8 +208,8 @@ def _mandatory(system: str, *needles: str) -> bool:
     return False
 
 
-def agent(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """The demo agent: a weak model that follows only MANDATORY rules reliably."""
+def agent(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """The demo agent: a weak model that follows only MANDATORY rules (prompt or tool description) reliably."""
     system = next((m.get("content") or "" for m in messages if m["role"] == "system"), "")
     last = messages[-1] if messages else {"role": "user", "content": ""}
     user = next((m.get("content") or "" for m in reversed(messages) if m["role"] == "user"), "")
@@ -187,7 +240,8 @@ def agent(messages: list[dict[str, Any]]) -> dict[str, Any]:
             return call("get_cluster_status", {"cluster": cluster})
         return say(f"Yes, {cluster} is healthy and running NKP 2.15 on 16 nodes.")
     if any(w in low for w in ("scale", "bump")):
-        if _mandatory(system, "scale_nodepool", "confirm") and "confirm" not in low:
+        if (_mandatory(system, "scale_nodepool", "confirm") or _tool_mandatory(tools or [], "scale_nodepool",
+                                                                                "confirm")) and "confirm" not in low:
             return say("Please confirm the cluster, node pool and replica count before I scale.")
         return call("scale_nodepool", {"cluster": cluster, "nodepool": "gpu-pool", "replicas": 6})
     if "endpoint" in low:
@@ -207,8 +261,16 @@ def respond(body: dict[str, Any]) -> dict[str, Any]:
         msg = {"role": "assistant", "content": json.dumps(locate(user))}
     elif system.startswith("You improve an AI agent's harness"):
         msg = {"role": "assistant", "content": json.dumps(fix(user))}
+    elif system.startswith("You improve an AI agent's tool description"):
+        msg = {"role": "assistant", "content": json.dumps(fix_tool_description(user))}
+    elif system.startswith("You improve an AI agent's tool argument schema"):
+        msg = {"role": "assistant", "content": json.dumps(fix_tool_schema(user))}
+    elif system.startswith("You improve an AI agent's guardrails"):
+        msg = {"role": "assistant", "content": json.dumps(fix_guardrail(user))}
+    elif system.startswith("You tune an AI agent's runtime configuration"):
+        msg = {"role": "assistant", "content": json.dumps(fix_config(user))}
     else:
-        msg = agent(messages)
+        msg = agent(messages, body.get("tools"))
     prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
     out_chars = len(str(msg.get("content") or "")) + len(json.dumps(msg.get("tool_calls") or []))
     return {

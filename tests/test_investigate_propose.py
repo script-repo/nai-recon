@@ -101,12 +101,13 @@ def test_propose_replay_branch_and_approval(evaluated, cfg, harness_dir, harness
 
 
 def test_patch_that_does_not_help_is_not_proposed(store, cfg, harness, llm):
-    # Guardrail patterns are enforced on output, not in the prompt: the mock agent ignores
-    # guardrails.yaml, so a guardrail-file patch cannot fix the leak in replay.
-    seed(store, [synthetic.sc_endpoints_leak] * 2)
+    # A generic note in get_cluster_status's description doesn't make the demo agent call it
+    # (it only follows MANDATORY prompt rules for that), so replay shows no improvement.
+    seed(store, [synthetic.sc_health_no_status] * 2)
     evaluate(store, cfg, harness, llm)
-    ins = next(i for i in store.insights() if i.rubric_id == "R-G1")
-    p = propose(store, cfg, ins.insight_id, harness, llm, branch=True)
+    ins = next(i for i in store.insights() if "get_cluster_status" in i.title)
+    p = propose(store, cfg, ins.insight_id, harness, llm, branch=True, kind="tool_description")
+    assert p["kind"] == "tool_description"
     assert p["status"] == "NOT_IMPROVED" and p["branch"] is None
 
 
