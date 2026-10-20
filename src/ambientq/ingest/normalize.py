@@ -279,3 +279,7 @@ def harness_version(span: Span) -> str:
         or span.resource.get("service.version")
         or ""
     )
+
+
+def team(span: Span) -> str:
+    return str(span.attributes.get("ambientq.team") or span.resource.get("ambientq.team") or "")

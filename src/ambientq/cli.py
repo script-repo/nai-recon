@@ -30,7 +30,7 @@ def _ctx(args: argparse.Namespace) -> tuple[Config, Any]:
     from ambientq.store import SQLStore
 
     cfg = Config.load(args.config)
-    return cfg, SQLStore(cfg.get("store", "url"))
+    return cfg, SQLStore(cfg.get("store", "url"), team_of=cfg.team_for)
 
 
 def _llm(cfg: Config, store: Any) -> Any:

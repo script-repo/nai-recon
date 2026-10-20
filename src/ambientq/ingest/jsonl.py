@@ -51,6 +51,7 @@ def record_to_conversation(rec: dict[str, Any]) -> Conversation:
         agent_name=str(rec.get("agent") or rec.get("agent_name") or ""),
         harness_version=str(rec.get("harness_version") or ""),
         metadata=dict(rec.get("metadata") or {}),
+        team=str(rec.get("team") or ""),
     )
     turns: list[Turn] = []
     names: dict[str, str] = {}

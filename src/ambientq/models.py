@@ -26,6 +26,14 @@ class InsightStatus(enum.StrEnum):
     RESOLVED = "RESOLVED"
 
 
+class PatchKind(enum.StrEnum):
+    PROMPT = "prompt"
+    TOOL_DESCRIPTION = "tool_description"
+    TOOL_SCHEMA = "tool_schema"
+    GUARDRAIL = "guardrail"
+    CONFIG = "config"
+
+
 class ProposalStatus(enum.StrEnum):
     DRAFT = "DRAFT"
     REPLAYED = "REPLAYED"
@@ -108,6 +116,7 @@ class Conversation:
     output_tokens: int = 0
     has_error: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    team: str = ""
 
     @property
     def tool_calls(self) -> list[Turn]:
@@ -172,6 +181,9 @@ class Insight:
     harness_version_last: str = ""
     created_at: float = field(default_factory=now_s)
     updated_at: float = field(default_factory=now_s)
+    team: str = ""
+    resolved_at: float | None = None
+    regressions: int = 0
 
 
 @dataclass
@@ -192,6 +204,7 @@ class Patch:
     replacement: str
     diff: str
     rationale: str
+    kind: str = "prompt"
 
 
 @dataclass
@@ -212,6 +225,8 @@ class Run:
     budget_tokens: int = 0
     status: str = "running"
     notes: str = ""
+    team: str = ""
+    agent_name: str = ""
 
 
 def sha256_text(text: str) -> str:

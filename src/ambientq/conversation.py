@@ -69,6 +69,8 @@ def build_conversation(conversation_id: str, spans: list[Span]) -> Conversation:
             conv.agent_name = nz.agent_name(span)
         if not conv.harness_version:
             conv.harness_version = nz.harness_version(span)
+        if not conv.team:
+            conv.team = nz.team(span)
         if span.is_error:
             conv.has_error = True
         a = span.attributes

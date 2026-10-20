@@ -5,4 +5,4 @@ on Nutanix Enterprise AI (or any OpenAI-compatible endpoint), deduplicates
 failures into insights and proposes harness patches for human approval.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

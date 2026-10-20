@@ -75,3 +75,31 @@ def test_file_store(tmp_path):
     s.save_run(Run(run_id="r", started_at=1))
     s.close()
     assert SQLStore(f"sqlite:///{tmp_path}/sub/a.db").get_run("r")
+
+
+def test_v01_database_upgrades_in_place(tmp_path):
+    import sqlite3
+
+
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE insights (insight_id TEXT PRIMARY KEY, fingerprint TEXT UNIQUE, title TEXT, "
+                "category TEXT, rubric_id TEXT, agent_name TEXT, tool_name TEXT, expected TEXT, status TEXT, "
+                "severity TEXT, first_seen_run TEXT, last_seen_run TEXT, occurrence_count INTEGER, "
+                "conversation_count INTEGER, quiet_runs INTEGER, harness_version_first TEXT, "
+                "harness_version_last TEXT, created_at REAL, updated_at REAL)")
+    con.commit()
+    con.close()
+    s = SQLStore(f"sqlite:///{db}", team_of=lambda agent: "platform")
+    try:
+        assert {"team", "resolved_at", "regressions"} <= s.columns("insights")
+        s.save_insight(Insight("ins_1", "fp", "t", "safety", "G-SAFETY", "a", InsightStatus.NEW, "high",
+                               "run_1", "run_1", team="platform"))
+        assert s.insights(team="platform")[0].insight_id == "ins_1"
+        assert s.insights(team="other") == []
+        s.record_usage(agent="a", model="m", source="agent", input_tokens=10, output_tokens=5, usage_id="u1")
+        s.record_usage(agent="a", model="m", source="agent", input_tokens=10, output_tokens=5, usage_id="u1")
+        rows = s.usage_rows()
+        assert len(rows) == 1 and rows[0]["team"] == "platform"
+    finally:
+        s.close()

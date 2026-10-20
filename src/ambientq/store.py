@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -63,6 +63,28 @@ SCHEMA = [
         approved_by TEXT, approved_at DOUBLE PRECISION, created_at DOUBLE PRECISION)""",
     """CREATE TABLE IF NOT EXISTS audit (
         id TEXT PRIMARY KEY, ts DOUBLE PRECISION, actor TEXT, action TEXT, subject TEXT, detail TEXT)""",
+    "CREATE INDEX IF NOT EXISTS ix_audit_ts ON audit(ts)",
+    # v0.2: token usage per agent/model, for cost tracking
+    """CREATE TABLE IF NOT EXISTS usage (
+        id TEXT PRIMARY KEY, ts DOUBLE PRECISION, team TEXT, agent_name TEXT, model TEXT, source TEXT,
+        purpose TEXT, input_tokens INTEGER, output_tokens INTEGER, conversation_id TEXT, run_id TEXT)""",
+    "CREATE INDEX IF NOT EXISTS ix_usage_ts ON usage(ts)",
+]
+
+# v0.2 additive migrations: (table, column, type). Added when missing, so v0.1
+# databases upgrade in place.
+COLUMNS = [
+    ("conversations", "team", "TEXT"),
+    ("runs", "team", "TEXT"),
+    ("runs", "agent_name", "TEXT"),
+    ("insights", "team", "TEXT"),
+    ("insights", "resolved_at", "DOUBLE PRECISION"),
+    ("insights", "regressions", "INTEGER"),
+    ("proposals", "team", "TEXT"),
+    ("proposals", "agent_name", "TEXT"),
+    ("proposals", "kind", "TEXT"),
+    ("proposals", "shadow", "TEXT"),
+    ("proposals", "decision_note", "TEXT"),
 ]
 
 
@@ -73,8 +95,9 @@ def _j(v: Any) -> str:
 class SQLStore:
     """One class for both dialects; SQL is written in the common subset."""
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, team_of: Callable[[str], str] | None = None) -> None:
         self.url = url
+        self.team_of = team_of
         self._lock = threading.RLock()
         if url.startswith("sqlite:///") or url == "sqlite://:memory:" or url == ":memory:":
             path = ":memory:" if url in ("sqlite://:memory:", ":memory:") else url[len("sqlite:///"):]
@@ -118,10 +141,25 @@ class SQLStore:
         with self._lock:
             self.conn.commit()
 
+    def columns(self, table: str) -> set[str]:
+        if self.dialect == "sqlite":
+            return {r["name"] for r in self.query(f"PRAGMA table_info({table})")}
+        rows = self.query("SELECT column_name FROM information_schema.columns WHERE table_name=?", (table,))
+        return {r["column_name"] for r in rows}
+
     def migrate(self) -> None:
         for stmt in SCHEMA:
             self.execute(stmt)
+        have: dict[str, set[str]] = {}
+        for table, col, typ in COLUMNS:
+            cols = have.setdefault(table, self.columns(table))
+            if col not in cols:
+                self.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+                cols.add(col)
         self.commit()
+
+    def default_team(self, agent: str) -> str:
+        return self.team_of(agent) if self.team_of else "default"
 
     def close(self) -> None:
         self.conn.close()
@@ -132,8 +170,16 @@ class SQLStore:
                      (new_id("aud"), now_s(), actor, action, subject, _j(detail or {})))
         self.commit()
 
-    def audit_log(self, limit: int = 200) -> list[dict[str, Any]]:
-        return self.query("SELECT * FROM audit ORDER BY ts DESC LIMIT ?", (limit,))
+    def audit_log(self, limit: int = 200, *, since: float = 0.0, until: float | None = None,
+                  ascending: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM audit WHERE ts >= ?"
+        params: list[Any] = [since]
+        if until is not None:
+            sql += " AND ts < ?"
+            params.append(until)
+        sql += f" ORDER BY ts {'ASC' if ascending else 'DESC'} LIMIT ?"
+        params.append(limit)
+        return self.query(sql, params)
 
     # -- ingest -----------------------------------------------------------------
     def ingest_spans(self, spans: Iterable[Span]) -> set[str]:
@@ -194,19 +240,21 @@ class SQLStore:
         ]
 
     def upsert_conversation(self, conv: Conversation, source: str = "record") -> None:
+        if not conv.team:
+            conv.team = str(conv.metadata.get("team") or "") or self.default_team(conv.agent_name)
         self.execute(
             """INSERT INTO conversations(conversation_id, agent_name, harness_version, source, started_ns,
-               ended_ns, turn_count, input_tokens, output_tokens, has_error, turns, metadata, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ended_ns, turn_count, input_tokens, output_tokens, has_error, turns, metadata, updated_at, team)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(conversation_id) DO UPDATE SET agent_name=excluded.agent_name,
                harness_version=excluded.harness_version, started_ns=excluded.started_ns,
                ended_ns=excluded.ended_ns, turn_count=excluded.turn_count,
                input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens,
                has_error=excluded.has_error, turns=excluded.turns, metadata=excluded.metadata,
-               updated_at=excluded.updated_at""",
+               updated_at=excluded.updated_at, team=excluded.team""",
             (conv.conversation_id, conv.agent_name, conv.harness_version, source, conv.started_ns,
              conv.ended_ns, len(conv.turns), conv.input_tokens, conv.output_tokens, int(conv.has_error),
-             _j([asdict(t) for t in conv.turns]), _j(conv.metadata), now_s()),
+             _j([asdict(t) for t in conv.turns]), _j(conv.metadata), now_s(), conv.team),
         )
         self.commit()
 
@@ -219,6 +267,7 @@ class SQLStore:
             started_ns=int(r["started_ns"] or 0), ended_ns=int(r["ended_ns"] or 0),
             input_tokens=int(r["input_tokens"] or 0), output_tokens=int(r["output_tokens"] or 0),
             has_error=bool(r["has_error"]), metadata=json.loads(r["metadata"] or "{}"),
+            team=r.get("team") or "",
         )
 
     def get_conversation(self, conversation_id: str) -> Conversation | None:
@@ -226,12 +275,16 @@ class SQLStore:
         return self._row_to_conv(rows[0]) if rows else None
 
     def list_conversations(self, *, agent: str | None = None, since_ns: int = 0,
-                           not_evaluated_for: str | None = None, limit: int = 100_000) -> list[Conversation]:
+                           not_evaluated_for: str | None = None, limit: int = 100_000,
+                           team: str | None = None) -> list[Conversation]:
         sql = "SELECT * FROM conversations WHERE started_ns >= ?"
         params: list[Any] = [since_ns]
         if agent:
             sql += " AND agent_name = ?"
             params.append(agent)
+        if team:
+            sql += " AND team = ?"
+            params.append(team)
         if not_evaluated_for is not None:
             sql += " AND (last_evaluated_version IS NULL OR last_evaluated_version <> ?)"
             params.append(not_evaluated_for)
@@ -271,12 +324,22 @@ class SQLStore:
         )
         self.commit()
 
-    def list_runs(self, limit: int = 50) -> list[Run]:
-        return [Run(**r) for r in self.query("SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,))]
+    @staticmethod
+    def _row_to_run(r: dict[str, Any]) -> Run:
+        r = dict(r)
+        r["team"], r["agent_name"] = r.get("team") or "", r.get("agent_name") or ""
+        return Run(**r)
+
+    def list_runs(self, limit: int = 50, team: str | None = None) -> list[Run]:
+        if team:
+            rows = self.query("SELECT * FROM runs WHERE team=? ORDER BY started_at DESC LIMIT ?", (team, limit))
+        else:
+            rows = self.query("SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,))
+        return [self._row_to_run(r) for r in rows]
 
     def get_run(self, run_id: str) -> Run | None:
         rows = self.query("SELECT * FROM runs WHERE run_id=?", (run_id,))
-        return Run(**rows[0]) if rows else None
+        return self._row_to_run(rows[0]) if rows else None
 
     # -- findings ---------------------------------------------------------------
     def save_finding(self, f: Finding) -> None:
@@ -331,9 +394,12 @@ class SQLStore:
     def _row_to_insight(r: dict[str, Any]) -> Insight:
         r = dict(r)
         r["status"] = InsightStatus(r["status"])
+        r["team"] = r.get("team") or ""
+        r["regressions"] = int(r.get("regressions") or 0)
         return Insight(**r)
 
-    def insights(self, status: str | None = None, agent: str | None = None) -> list[Insight]:
+    def insights(self, status: str | None = None, agent: str | None = None,
+                 team: str | None = None) -> list[Insight]:
         sql, params = "SELECT * FROM insights WHERE 1=1", []
         if status:
             sql += " AND status=?"
@@ -341,6 +407,9 @@ class SQLStore:
         if agent:
             sql += " AND agent_name=?"
             params.append(agent)
+        if team:
+            sql += " AND team=?"
+            params.append(team)
         sql += " ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, occurrence_count DESC"
         return [self._row_to_insight(r) for r in self.query(sql, params)]
 
@@ -372,8 +441,9 @@ class SQLStore:
     def save_proposal(self, p: dict[str, Any]) -> None:
         p = dict(p)
         p.setdefault("created_at", now_s())
-        if isinstance(p.get("replay"), (dict, list)):
-            p["replay"] = _j(p["replay"])
+        for k in ("replay", "shadow"):
+            if isinstance(p.get(k), (dict, list)):
+                p[k] = _j(p[k])
         cols = list(p)
         self.execute(
             f"INSERT INTO proposals({','.join(cols)}) VALUES ({','.join('?' * len(cols))}) "
@@ -383,25 +453,59 @@ class SQLStore:
         )
         self.commit()
 
-    def proposals(self, insight_id: str | None = None) -> list[dict[str, Any]]:
-        sql, params = "SELECT * FROM proposals", []
-        if insight_id:
-            sql += " WHERE insight_id=?"
-            params.append(insight_id)
-        rows = self.query(sql + " ORDER BY created_at DESC", params)
-        for r in rows:
-            r["replay"] = json.loads(r["replay"]) if r.get("replay") else None
-        return rows
+    @staticmethod
+    def _proposal_row(r: dict[str, Any]) -> dict[str, Any]:
+        for k in ("replay", "shadow"):
+            r[k] = json.loads(r[k]) if r.get(k) else None
+        r["kind"] = r.get("kind") or "prompt"
+        return r
+
+    def proposals(self, insight_id: str | None = None, team: str | None = None,
+                  status: str | None = None) -> list[dict[str, Any]]:
+        sql, params = "SELECT * FROM proposals WHERE 1=1", []
+        for col, val in (("insight_id", insight_id), ("team", team), ("status", status)):
+            if val:
+                sql += f" AND {col}=?"
+                params.append(val)
+        return [self._proposal_row(r) for r in self.query(sql + " ORDER BY created_at DESC", params)]
 
     def get_proposal(self, proposal_id: str) -> dict[str, Any] | None:
         rows = self.query("SELECT * FROM proposals WHERE proposal_id=? OR proposal_id LIKE ?",
                           (proposal_id, proposal_id + "%"))
         if len(rows) != 1:
             return None
-        r = rows[0]
-        r["replay"] = json.loads(r["replay"]) if r.get("replay") else None
-        return r
+        return self._proposal_row(rows[0])
+
+    # -- usage (v0.2) -----------------------------------------------------------
+    def record_usage(self, *, agent: str, model: str, source: str, input_tokens: int, output_tokens: int,
+                     purpose: str = "", team: str | None = None, conversation_id: str = "", run_id: str = "",
+                     ts: float | None = None, usage_id: str | None = None) -> None:
+        """One usage row. ``source`` is ``agent`` (production traffic) or ``ambientq`` (its own calls).
+
+        ``usage_id`` makes the row idempotent (re-ingesting a span doesn't double count).
+        """
+        self.execute(
+            """INSERT INTO usage(id, ts, team, agent_name, model, source, purpose, input_tokens, output_tokens,
+               conversation_id, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+               input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, model=excluded.model""",
+            (usage_id or new_id("use"), ts if ts is not None else now_s(),
+             team if team is not None else self.default_team(agent), agent, model or "unknown", source, purpose,
+             int(input_tokens or 0), int(output_tokens or 0), conversation_id, run_id),
+        )
+        self.commit()
+
+    def usage_rows(self, *, since: float = 0.0, until: float | None = None,
+                   team: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM usage WHERE ts >= ?"
+        params: list[Any] = [since]
+        if until is not None:
+            sql += " AND ts < ?"
+            params.append(until)
+        if team:
+            sql += " AND team = ?"
+            params.append(team)
+        return self.query(sql + " ORDER BY ts", params)
 
 
-def open_store(url: str) -> SQLStore:
-    return SQLStore(url)
+def open_store(url: str, team_of: Callable[[str], str] | None = None) -> SQLStore:
+    return SQLStore(url, team_of)

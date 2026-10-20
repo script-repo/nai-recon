@@ -6,7 +6,7 @@ import hashlib
 import re
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ambientq.models import Finding, Insight, InsightStatus, new_id, now_s
 from ambientq.store import SQLStore
@@ -47,11 +47,12 @@ class CorrelationResult:
     new: list[str]
     recurring: list[str]
     resolved: list[str]
+    regressions: list[str] = field(default_factory=list)  # RESOLVED insights seen again
 
 
 def correlate(store: SQLStore, run_id: str, findings: Iterable[Finding], *, agents_evaluated: Iterable[str],
               harness_version: str = "", similarity: float = 0.5, resolve_after_runs: int = 2,
-              titles: dict[str, str] | None = None) -> CorrelationResult:
+              titles: dict[str, str] | None = None, team: str | None = None) -> CorrelationResult:
     """Attach verified findings to insights and update every insight's status."""
     titles = titles or {}
     res = CorrelationResult([], [], [])
@@ -81,10 +82,15 @@ def correlate(store: SQLStore, run_id: str, findings: Iterable[Finding], *, agen
                 status=InsightStatus.NEW, severity=head.severity, first_seen_run=run_id, last_seen_run=run_id,
                 tool_name=head.tool_name, expected=head.expected, harness_version_first=harness_version,
                 harness_version_last=harness_version,
+                team=team if team is not None else store.default_team(head.agent_name),
             )
             res.new.append(ins.insight_id)
         else:
             if ins.last_seen_run != run_id:
+                if ins.status == InsightStatus.RESOLVED:
+                    ins.regressions += 1
+                    ins.resolved_at = None
+                    res.regressions.append(ins.insight_id)
                 ins.status = InsightStatus.RECURRING
                 res.recurring.append(ins.insight_id)
             ins.last_seen_run = run_id
@@ -109,6 +115,7 @@ def correlate(store: SQLStore, run_id: str, findings: Iterable[Finding], *, agen
         ins.quiet_runs += 1
         if ins.quiet_runs >= resolve_after_runs:
             ins.status = InsightStatus.RESOLVED
+            ins.resolved_at = now_s()
             res.resolved.append(ins.insight_id)
             store.save_occurrence(ins.insight_id, run_id, 0, [], str(ins.status))
         ins.updated_at = now_s()

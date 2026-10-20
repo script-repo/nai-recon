@@ -35,11 +35,31 @@ DEFAULTS: dict[str, Any] = {
     "judge": {"max_findings": 8, "min_confidence": 0.5, "goal": None},
     "verifier": {"enabled": True, "llm": True},
     "insights": {"similarity": 0.5, "resolve_after_runs": 2},
-    "replay": {"enabled": True, "model": None, "max_conversations": 5, "control_sample": 2},
+    "replay": {"enabled": True, "model": None, "max_conversations": 5, "control_sample": 2,
+               "mode": "multi", "max_steps": 8, "unmatched": "nearest"},
+    "shadow": {"enabled": False, "since": "24h", "limit": 20},
     "forge": {"kind": None, "api_url": None, "repo": None, "token_env": "FORGE_TOKEN", "base_branch": "main"},
     "server": {"host": "127.0.0.1", "port": 8080, "ingest_token_env": "AMBIENTQ_INGEST_TOKEN"},
     "checks": {"disabled": [], "plugins": []},
     "ingest": {"redact": []},
+    # v0.2 -----------------------------------------------------------------------
+    "agents": [],  # [{name, harness, team}]; empty = the single harness.path agent
+    "teams": {"default": "default"},
+    "pricing": {"currency": "USD", "default": {"input_per_1k": 0.0, "output_per_1k": 0.0}, "models": {}},
+    "alerts": {"min_severity": "high", "on_regression": True, "webhooks": []},
+    "gateway": {"session_fields": [], "mappings": {}},
+    "auth": {
+        "mode": "none",  # none | oidc | proxy
+        "session_secret_env": "AMBIENTQ_SESSION_SECRET",
+        "session_ttl_s": 28800,
+        "cookie_insecure": False,
+        "public_url": None,
+        "oidc": {"issuer": None, "client_id": None, "client_secret_env": "AMBIENTQ_OIDC_CLIENT_SECRET",
+                 "scopes": "openid email profile", "groups_claim": "groups", "ca_bundle": None},
+        "proxy": {"user_header": "X-Forwarded-User", "email_header": "X-Forwarded-Email",
+                  "groups_header": "X-Forwarded-Groups", "trusted_proxies": ["127.0.0.1/32", "::1/128"]},
+        "roles": {"admin": [], "approver": [], "viewer": ["*"]},
+    },
 }
 
 ENV_MAP = {
@@ -53,6 +73,7 @@ ENV_MAP = {
     "AMBIENTQ_BUDGET_MAX_TOKENS": ("budget", "max_tokens_per_run"),
     "AMBIENTQ_SERVER_HOST": ("server", "host"),
     "AMBIENTQ_SERVER_PORT": ("server", "port"),
+    "AMBIENTQ_AUTH_MODE": ("auth", "mode"),
 }
 
 
@@ -94,6 +115,30 @@ class Config:
             return None
         return os.environ.get(env_name) or None
 
+    def agents(self) -> list[dict[str, Any]]:
+        """Every agent this install grades: ``[{name, harness, team}]``.
+
+        Without an ``agents`` list, the single v0.1 ``harness.path`` is the one
+        agent (its name comes from its harness.yaml).
+        """
+        default_team = str(self.get("teams", "default", "default") or "default")
+        base = self.path.parent if self.path else Path.cwd()
+        out = []
+        for a in self.data.get("agents") or []:
+            hp = str(a.get("harness") or self.get("harness", "path"))
+            if not Path(hp).is_absolute():
+                hp = str((base / hp).resolve())
+            out.append({"name": a.get("name"), "harness": hp, "team": str(a.get("team") or default_team)})
+        if not out:
+            out.append({"name": None, "harness": self.get("harness", "path"), "team": default_team})
+        return out
+
+    def team_for(self, agent: str) -> str:
+        for a in self.data.get("agents") or []:
+            if a.get("name") == agent and a.get("team"):
+                return str(a["team"])
+        return str(self.get("teams", "default", "default") or "default")
+
     @classmethod
     def load(cls, path: str | Path | None = None, overrides: dict[str, Any] | None = None) -> Config:
         data = copy.deepcopy(DEFAULTS)
@@ -117,7 +162,7 @@ class Config:
         return cls(data=data, path=p)
 
 
-_SECRET_KEYS = {"api_key", "token", "password", "secret"}
+_SECRET_KEYS = {"api_key", "token", "password", "secret", "client_secret", "session_secret", "url_secret"}
 
 
 def _reject_inline_secrets(d: Any, trail: str = "") -> None:
@@ -129,3 +174,6 @@ def _reject_inline_secrets(d: Any, trail: str = "") -> None:
                     f"variable and reference it with '{k}_env' instead"
                 )
             _reject_inline_secrets(v, f"{trail}{k}.")
+    elif isinstance(d, list):
+        for i, v in enumerate(d):
+            _reject_inline_secrets(v, f"{trail}{i}.")

@@ -1,6 +1,6 @@
 # ambientq: on-prem ambient quality agent — specification
 
-Status: v0.1 (draft, implemented in this repo)
+Status: v0.2 (implemented in this repo; §11 lists what v0.2 adds to v0.1)
 Package: `ambientq` · CLI: `ambientq` · License: Apache-2.0
 
 ## 1. Purpose
@@ -369,12 +369,184 @@ checks: {disabled: [], plugins: []}
 * **PII**: optional redaction regexes (`ingest.redact`) are applied before
   storage.
 
-## 11. Roadmap
+## 11. v0.2 additions
 
-* v0.2: multi-step replay with recorded tool-result stubs; ADK/BigQuery-style
-  importers; Prometheus metrics endpoint; Postgres in CI.
-* v0.3: NAI management-API integration (discover endpoints, per-endpoint
-  usage), Nutanix AI Gateway trace import, OIDC on the dashboard.
-* v0.4: LLM-based semantic clustering with embeddings served by NAI;
-  scheduled runs as a Kubernetes CronJob triggered after agent deploys
-  (Argo/Flux webhook); dataset export for fine-tuning.
+v0.2 builds everything on the roadmap that does not need a live NAI
+endpoint. Each part works against any OpenAI-compatible endpoint and is tested
+with the mock model. New config sections all have defaults that keep v0.1
+behaviour, so a v0.1 config file still works unchanged.
+
+### 11.1 Judge calibration (`ambientq calibrate`)
+
+Before trusting a judge model on NAI, measure it against human labels.
+
+* **Labeled set** (JSONL, one conversation per line): any conversation record
+  ambientq can ingest (simple record, OTLP export) plus a `labels` object:
+  `{"labels": {"defects": [{"category": "procedure", "rubric_id": "R-P3"}], "clean": false, "labeler": "..."}}`.
+  `clean: true` with no defects marks a conversation a human found correct.
+* `ambientq calibrate LABELED.jsonl [--model M] [--base-url URL] [--json] [--out report.json]`
+  runs the judge (and, unless `--no-verify`, the verifier) on every labeled
+  conversation and compares, per category and per rubric item:
+  true/false positives and negatives, **precision**, **recall**, F1, and
+  conversation-level **agreement** (judge flags a conversation iff a human did)
+  with Cohen's kappa. It also reports judge tokens and latency per
+  conversation, which sizes the NAI endpoint.
+* A sample labeled set built from the demo scenarios ships in the package
+  (`ambientq calibrate --sample`). `docs/CALIBRATION.md` explains how to label
+  real traffic and run it against an NAI endpoint, and how to read the numbers
+  (e.g. raise `judge.min_confidence` when precision is low).
+
+### 11.2 Multi-step replay with recorded tool results
+
+* Tool results are already stored as `tool` turns at ingest. v0.2 indexes them
+  per conversation into a **tool-result tape**: `(tool name, canonical JSON of
+  args) -> [results in order]`.
+* `replay.mode: multi` (new default; `single` keeps v0.1 behaviour). From the
+  cut point the agent's model is called in a loop under the patched harness
+  (and under the original as control). Each tool call it makes is answered
+  from the tape:
+  1. exact match on name + canonical args (each recorded result used once, in order);
+  2. else `replay.unmatched` policy: `nearest` (default: same tool, most
+     argument keys/values in common), `error` (return a structured
+     "not recorded" tool error), or `stop` (end the continuation there).
+  Every non-exact answer is **flagged** in the replay row
+  (`unmatched_calls: [...]`), and so is a call to a tool the harness doesn't define.
+* The loop stops at a final assistant answer, at `replay.max_steps` (default 8)
+  model calls, or on the `stop` policy. The whole continuation is graded with
+  checks (now including `empty_final_answer` and `unanswered_tool_call`) and the
+  judge focused on the insight's rubric item.
+* User turns after the cut are not replayed (a replay can't know how the user
+  would have answered a different reply); the continuation ends where the agent
+  would hand back to the user. This is stated in every replay report (`mode`, `steps`).
+
+### 11.3 Gateway ingest (no agent code changes)
+
+* Research result (Oct 2026, recorded in `docs/GATEWAY.md`): what Nutanix
+  documents publicly for NAI / its AI gateway, and which export formats exist.
+* `ambientq ingest --format proxy-log FILE...` (also `--format nai-gateway`, and
+  auto-detection): an adapter for OpenAI-compatible proxy logs: one JSON object
+  per request/response pair (LiteLLM spend/request logs, Envoy AI Gateway
+  access logs, generic API gateways). Pairs are grouped into conversations by
+  a session header/field, falling back to a hash of the first user message, and
+  converted into GenAI-semconv LLM spans, so the rest of the pipeline is
+  unchanged. Tool calls in a response and tool results in the next request
+  become tool turns, so multi-step replay works on gateway traffic too.
+* Field mappings are configurable (`gateway.mappings`, dotted paths), so any
+  gateway log shape can be ingested without code.
+* The server also accepts `POST /v1/gateway/logs` (same token as OTLP) for
+  gateways that can POST their logs (webhook / HTTP log sink).
+
+### 11.4 Dashboard sign-in, roles and approvals
+
+* `auth.mode`: `none` (default, read-only dashboard as in v0.1), `oidc`, or `proxy`.
+* **OIDC**: authorization code flow with PKCE (S256), stdlib only. Discovery
+  from `{issuer}/.well-known/openid-configuration`; the ID token from the
+  token endpoint is validated on its claims (issuer, audience, expiry, nonce)
+  after a direct TLS back-channel exchange (per OIDC Core §3.1.3.7, TLS from
+  the token endpoint stands in for signature validation; RS256 signature
+  verification against the JWKS is done when the optional `cryptography`
+  extra is installed: `pip install 'ambientq[oidc]'`).
+* **Proxy**: trust identity headers (`X-Forwarded-User`, `X-Forwarded-Email`,
+  `X-Forwarded-Groups`, as set by oauth2-proxy / Pomerium / an ingress) only
+  from `auth.proxy.trusted_proxies` CIDRs.
+* **Roles**: `viewer` < `approver` < `admin`, granted by user, email or group
+  (`auth.roles`). Sessions are HMAC-signed cookies (`HttpOnly`, `SameSite=Lax`,
+  `Secure` unless `auth.cookie_insecure`), secret from `auth.session_secret_env`.
+* **Approvals**: approvers see Approve / Reject on a proposal page that shows
+  the diff and the replay (and shadow) results side by side; POST forms carry a
+  per-session **CSRF token** (double-submit, constant-time compared) and the
+  `Origin` header is checked. Every decision, sign-in and sign-in failure is
+  written to the audit log. Admins can see the audit page and exports.
+* With `auth.mode: none` the dashboard has no write endpoints at all.
+* New UI look: system font stack (Inter / Segoe UI / Roboto fallbacks),
+  sidebar navigation, cards, status pills, side-by-side diff/replay view,
+  print-friendly; still one server-rendered page per view, no JavaScript needed.
+
+### 11.5 Fixes beyond the system prompt; shadow testing
+
+* Every proposal has a `kind`: `prompt`, `tool_description`, `tool_schema`,
+  `guardrail` or `config`, picked from the insight (rubric item location, tool
+  categories, check that fired). Each kind has its own fixer instructions:
+  * `tool_description`: rewrite the tool's `description` (when to call it, what it returns);
+  * `tool_schema`: change the tool's `parameters` JSON schema (add `required`,
+    `enum`, `pattern`, `minimum`, descriptions) — validated as a JSON Schema
+    object and that the tools file still loads;
+  * `guardrail`: add or tighten a guardrail rule or `forbidden_patterns` regex
+    (each regex must compile);
+  * `config`: change agent config keys (e.g. `max_turns`, `temperature`) —
+    only keys already present, values type-checked.
+  Structured patches are applied with YAML node locations, so the diff is still
+  a minimal `git apply`-able unified diff on the original file.
+* **Shadow testing** (`ambientq shadow PROPOSAL [--since 24h] [--limit N]`, and
+  `shadow.enabled` to run it after every `evaluate`): replays *new* incoming
+  conversations (not the ones the fix was made from) under the live and the
+  patched harness with the replay model, grades both, and stores per-proposal
+  results: conversations compared, findings live vs. patched, wins, losses,
+  and a verdict (`better`, `same`, `worse`). Approvers see it next to the replay.
+
+### 11.6 Compliance reporting and SIEM export
+
+* `ambientq report --month YYYY-MM [--team T] [--format html|json|both] [--out DIR]`:
+  conversations ingested and graded, findings kept/rejected, insights
+  new/recurring/resolved, mean and median **time to fix** (insight first seen →
+  resolved), proposals by status and kind, every decision with who made it and
+  when, model usage and cost per model and per agent (agent traffic and
+  ambientq's own LLM calls separately), and the audit event counts. HTML has
+  print CSS (save as PDF from the browser); JSON has the same data.
+* `ambientq audit-export [--since 7d] --format jsonl|cef|syslog [--out FILE]`:
+  audit events as JSON lines, ArcSight CEF, or RFC 5424 syslog lines, for a
+  SIEM (Splunk, QRadar, Sentinel, Elastic). `--follow` is left to the SIEM's
+  file collector.
+
+### 11.7 Cost tracking
+
+* A `usage` table records tokens per (time, team, agent, model, source), where
+  source is `agent` (from ingested LLM spans / gateway logs) or `ambientq`
+  (judge, verifier, fixer, replay calls).
+* `pricing.models.<model>: {input_per_1k, output_per_1k}` and
+  `pricing.default`, in `pricing.currency` (default USD). On-prem GPU cost can
+  be expressed as an effective price per 1k tokens.
+* `ambientq usage [--since 30d] [--by agent|model|team] [--json]`; also in the
+  dashboard and the monthly report.
+
+### 11.8 Alerts
+
+* `alerts.webhooks: [{kind: slack|teams|generic, url_env: ENV, min_severity: high}]`
+  — URLs are secrets, read from env vars. After each `evaluate`, one message per
+  new insight at or above `min_severity`, and per **regression** (a RESOLVED
+  insight that recurs). Slack incoming-webhook and Teams (Adaptive Card via
+  Workflows/incoming webhook) payloads; `generic` posts JSON. Each delivery
+  (and failure) goes to the audit log; failures never fail the run.
+
+### 11.9 Multi-agent, multi-team
+
+* `agents: [{name, harness, team}]` lists every agent this install grades
+  (the v0.1 `harness.path` still works as a single agent). `evaluate`,
+  `investigate`, `propose` take `--agent`; without it `evaluate` runs every agent.
+* Each conversation, run, insight and proposal carries a `team`, taken from the
+  `agents` entry, else the span/resource attribute `ambientq.team`, else
+  `teams.default` (`default`).
+* CLI `--team` filters lists and reports; the dashboard has a team switcher, and
+  `auth.roles` entries can be scoped to teams (`approver: ["alice@x", {group: "sre", teams: ["platform"]}]`).
+
+### 11.10 Packaging
+
+* GitHub Actions `release.yml`: on tags `v*` or manual dispatch, build the
+  image with Buildx, push to `ghcr.io/<owner>/ambientq`, generate an SBOM with
+  syft (SPDX JSON, attached as an attestation and a workflow artifact), and sign
+  the image keylessly with cosign (GitHub OIDC). Never on ordinary pushes.
+* CI gains a `postgres` job with a PostgreSQL service container that runs the
+  store and end-to-end tests against Postgres.
+* Helm chart: values for auth, alerts, pricing, agents/teams, shadow; probes,
+  pod security context, optional Ingress, ServiceMonitor-free (no extra CRDs).
+* `docs/SE-DEMO.md`: a 10-minute demo script for Nutanix SEs.
+
+## 12. Roadmap (after v0.2)
+
+* Needs a live NAI endpoint: calibrate the judge on real labeled traffic per
+  model size; tune default prompts; NAI management-API integration (discover
+  endpoints, per-endpoint usage and cost).
+* Native Nutanix AI Gateway export once a documented log/OTel format exists
+  (the generic proxy-log adapter covers it meanwhile).
+* LLM-based semantic clustering with embeddings served by NAI.
+* Triggered runs after agent deploys (Argo/Flux webhook); dataset export for fine-tuning.
