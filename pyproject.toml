@@ -20,6 +20,7 @@ dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
+oidc = ["cryptography>=42"]
 otlp-proto = ["opentelemetry-proto>=1.20", "protobuf>=4.21"]
 dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.10", "types-PyYAML"]
 
